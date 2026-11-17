@@ -2,11 +2,12 @@
 //! Images are regenerated only for viewport / slice / camera changes, never per frame.
 use crate::{
     color::Oklch,
-    gamut_mesh::Vertex,
+    gamut_mesh::{Mesh, Vertex},
     model::{Plane, Project},
 };
 use anyhow::{Context, Result};
 use glam::{Mat4, Vec3};
+use std::sync::Mutex;
 use wgpu::util::DeviceExt;
 
 const SURFACE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -18,18 +19,50 @@ pub struct Gpu {
     queue: wgpu::Queue,
     slices: wgpu::ComputePipeline,
     surface: wgpu::RenderPipeline,
-    mesh: wgpu::Buffer,
-    indices: wgpu::Buffer,
-    index_count: u32,
+    source: Mesh,
+    polar_mesh: SurfaceBuffers,
+    chart: Mutex<(f64, SurfaceBuffers)>,
     surface_samples: u32,
     pub adapter_name: String,
 }
-pub fn world(c: Oklch) -> Vec3 {
-    Vec3::new(
-        (crate::model::normalized(c.h, 2) * 1.8 - 0.9) as f32,
-        (c.c / 0.4 * 1.2 - 0.3) as f32,
-        (c.l * 1.3 - 0.65) as f32,
-    )
+struct SurfaceBuffers {
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    count: u32,
+}
+impl SurfaceBuffers {
+    fn new(device: &wgpu::Device, mesh: &Mesh) -> Self {
+        Self {
+            vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Gamut vertices"),
+                contents: bytemuck::cast_slice(&mesh.vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            }),
+            indices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Gamut indices"),
+                contents: bytemuck::cast_slice(&mesh.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            }),
+            count: mesh.indices.len() as u32,
+        }
+    }
+}
+pub fn world(c: Oklch, p: &Project) -> Vec3 {
+    if p.polar {
+        let angle = (c.h - p.hue_origin).to_radians();
+        let radius = c.c / 0.4 * 1.2;
+        Vec3::new(
+            (radius * angle.cos()) as f32,
+            (c.l * 1.8 - 0.9) as f32,
+            (radius * angle.sin()) as f32,
+        )
+    } else {
+        Vec3::new(
+            (crate::model::hue_position(c.h, p.hue_origin) * 1.8 - 0.9) as f32,
+            (c.c / 0.4 * 1.2 - 0.3) as f32,
+            (c.l * 1.3 - 0.65) as f32,
+        )
+    }
 }
 pub fn camera(p: &Project, aspect: f32) -> Mat4 {
     let distance = 3.0 / p.zoom.clamp(0.5, 2.5);
@@ -39,10 +72,18 @@ pub fn camera(p: &Project, aspect: f32) -> Mat4 {
         distance * p.yaw.cos() * p.pitch.cos(),
     );
     Mat4::perspective_rh(40f32.to_radians(), aspect.max(0.1), 0.05, 50.)
-        * Mat4::look_at_rh(eye, Vec3::new(0., 0.15, 0.), Vec3::Y)
+        * Mat4::look_at_rh(
+            eye,
+            if p.polar {
+                Vec3::ZERO
+            } else {
+                Vec3::new(0., 0.15, 0.)
+            },
+            Vec3::Y,
+        )
 }
 pub fn project3(c: Oklch, p: &Project, aspect: f32) -> Option<[f64; 2]> {
-    let v = camera(p, aspect) * world(c).extend(1.);
+    let v = camera(p, aspect) * world(c, p).extend(1.);
     if v.w <= 0.01 {
         return None;
     }
@@ -142,26 +183,17 @@ impl Gpu {
             multiview_mask: None,
             cache: None,
         });
-        let data = crate::gamut_mesh::build();
-        let index_count = data.indices.len() as u32;
-        let mesh = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("sRGB gamut mesh"),
-            contents: bytemuck::cast_slice(&data.vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Gamut face indices"),
-            contents: bytemuck::cast_slice(&data.indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
+        let source = crate::gamut_mesh::source();
+        let polar_mesh = SurfaceBuffers::new(&device, &source);
+        let chart = Mutex::new((0., SurfaceBuffers::new(&device, &source.chart(0.))));
         Ok(Self {
             device,
             queue,
             slices,
             surface,
-            mesh,
-            indices,
-            index_count,
+            source,
+            polar_mesh,
+            chart,
             surface_samples,
             adapter_name,
         })
@@ -228,7 +260,7 @@ impl Gpu {
                 width as f32,
                 height as f32,
                 plane,
-                0.,
+                (p.hue_origin.rem_euclid(360.) / 360.) as f32,
                 p.slices[0] as f32,
                 p.slices[1] as f32,
                 p.slices[2] as f32,
@@ -263,7 +295,15 @@ impl Gpu {
             pass.set_bind_group(0, &group, &[]);
             pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
         } else {
-            let matrix = camera(p, width as f32 / height as f32).to_cols_array();
+            let mut matrix = camera(p, width as f32 / height as f32)
+                .to_cols_array()
+                .to_vec();
+            matrix.extend([
+                (p.hue_origin.rem_euclid(360.) / 360.) as f32,
+                if p.polar { 1. } else { 0. },
+                0.,
+                0.,
+            ]);
             let uniform = self
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -304,6 +344,15 @@ impl Gpu {
                     })
                     .create_view(&Default::default())
             });
+            let mut chart = self.chart.lock().unwrap();
+            let origin = p.hue_origin.rem_euclid(360.);
+            if !p.polar && chart.0 != origin {
+                *chart = (
+                    origin,
+                    SurfaceBuffers::new(&self.device, &self.source.chart(origin)),
+                );
+            }
+            let mesh = if p.polar { &self.polar_mesh } else { &chart.1 };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: None,
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -338,9 +387,9 @@ impl Gpu {
             });
             pass.set_pipeline(&self.surface);
             pass.set_bind_group(0, &group, &[]);
-            pass.set_vertex_buffer(0, self.mesh.slice(..));
-            pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..self.index_count, 0, 0..1);
+            pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+            pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..mesh.count, 0, 0..1);
         }
         let stride = (width * 4).div_ceil(256) * 256;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -404,7 +453,7 @@ fn image_size(width: f32, height: f32, scale: f32, limit: u32) -> [u32; 2] {
 
 #[cfg(test)]
 mod tests {
-    use super::{Gpu, image_size};
+    use super::{Gpu, image_size, project3, world};
     use crate::{
         color::{Oklch, decode},
         model::{Plane, Project},
@@ -416,6 +465,131 @@ mod tests {
         assert_eq!(image_size(450., 160., 2., 4096), [900, 320]);
         assert_eq!(image_size(3000., 1500., 2., 4096), [4096, 2048]);
         assert_eq!(image_size(1., 0., 1., 4096), [1, 1]);
+    }
+    #[test]
+    fn polar_axis_is_achromatic_lightness_up_with_periodic_hue_azimuth() {
+        let mut p = Project {
+            polar: true,
+            ..Default::default()
+        };
+        for hue in [0., 90., 215., 360., 720.] {
+            let black = world(Oklch::new(0., 0., hue), &p);
+            let white = world(Oklch::new(1., 0., hue), &p);
+            assert_eq!(black, glam::Vec3::new(0., -0.9, 0.));
+            assert_eq!(white, glam::Vec3::new(0., 0.9, 0.));
+            let point = world(Oklch::new(0.6, 0.2, hue), &p);
+            let wrapped = world(Oklch::new(0.6, 0.2, hue + 360.), &p);
+            assert!((point - wrapped).length() < 1e-6);
+            assert!((point.x.hypot(point.z) - 0.6).abs() < 1e-6);
+        }
+        let a = world(Oklch::new(0.5, 0.2, 90.), &p);
+        p.hue_origin = 90.;
+        let b = world(Oklch::new(0.5, 0.2, 90.), &p);
+        assert!(a.x.abs() < 1e-6 && b.z.abs() < 1e-6);
+        assert!((a.z - b.x).abs() < 1e-6);
+        let black = project3(Oklch::new(0., 0., 0.), &p, 1.5).unwrap();
+        let white = project3(Oklch::new(1., 0., 0.), &p, 1.5).unwrap();
+        assert!(white[1] > black[1]);
+    }
+
+    #[test]
+    #[ignore = "requires a real WGPU adapter; writes .research/cyclic-hue images"]
+    fn cyclic_hue_and_polar_views_render_on_gpu() {
+        let gpu = Gpu::new().unwrap();
+        let mut p = Project::default();
+        let (w, h) = (256u32, 160u32);
+        std::fs::create_dir_all(".research/cyclic-hue").unwrap();
+        for plane in Plane::ALL {
+            p.hue_origin = 0.;
+            let baseline = gpu.render(Some(plane), &p, w, h).unwrap();
+            p.hue_origin = 90.;
+            let shifted = gpu.render(Some(plane), &p, w, h).unwrap();
+            if plane == Plane::Cl {
+                assert_eq!(baseline, shifted);
+            } else {
+                let mut bad = 0;
+                for y in 0..h {
+                    for x in 0..w {
+                        let a = ((y * w + (x + w / 4) % w) * 4) as usize;
+                        let b = ((y * w + x) * 4) as usize;
+                        if (0..3)
+                            .any(|k| (baseline[a + k] as i32 - shifted[b + k] as i32).abs() > 2)
+                        {
+                            bad += 1;
+                        }
+                    }
+                }
+                assert!(
+                    bad < 20,
+                    "{plane:?}: {bad} pixels fail cyclic quarter-turn comparison"
+                );
+                println!(
+                    "{plane:?}: {} cyclic shift pixel comparisons, {bad} beyond tolerance",
+                    w * h
+                );
+            }
+            p.hue_origin = 450.;
+            assert_eq!(shifted, gpu.render(Some(plane), &p, w, h).unwrap());
+            image::save_buffer(
+                format!(".research/cyclic-hue/{plane:?}.png"),
+                &shifted,
+                w,
+                h,
+                image::ColorType::Rgba8,
+            )
+            .unwrap();
+        }
+        for polar in [false, true] {
+            p.polar = polar;
+            p.hue_origin = 57.;
+            let shifted = gpu.render(None, &p, 675, 401).unwrap();
+            assert!(shifted.as_chunks::<4>().0.iter().all(|p| p[3] == 255));
+            let colored = shifted
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|p| p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2]) > 35)
+                .count();
+            assert!(colored > 10000, "Empty gamut surface: polar={polar}");
+            p.hue_origin = 417.;
+            assert_eq!(shifted, gpu.render(None, &p, 675, 401).unwrap());
+            image::save_buffer(
+                format!(
+                    ".research/cyclic-hue/{}.png",
+                    if polar { "polar" } else { "rectangular" }
+                ),
+                &shifted,
+                675,
+                401,
+                image::ColorType::Rgba8,
+            )
+            .unwrap();
+            println!("polar={polar}: {colored} colored pixels; periodic rotation matches exactly");
+            if polar {
+                let white = project3(Oklch::new(1., 0., 0.), &p, 675. / 401.).unwrap();
+                let (x, y) = ((white[0] * 675.) as i32, ((1. - white[1]) * 401.) as i32);
+                assert!(
+                    (-4..=4).any(|dy| (-4..=4).any(|dx| {
+                        let (x, y) = (x + dx, y + dy);
+                        if !(0..675).contains(&x) || !(0..401).contains(&y) {
+                            return false;
+                        }
+                        let i = ((y * 675 + x) * 4) as usize;
+                        shifted[i..i + 3].iter().all(|c| *c > 220)
+                    })),
+                    "CPU white-axis endpoint must coincide with the GPU white tip"
+                );
+            }
+            let start = std::time::Instant::now();
+            for origin in [15., 35., 75., 125.] {
+                p.hue_origin = origin;
+                gpu.render(None, &p, 675, 240).unwrap();
+            }
+            println!(
+                "polar={polar}: {:.2} ms/changed-origin render (mesh + GPU + readback)",
+                start.elapsed().as_secs_f64() * 1000. / 4.
+            );
+        }
     }
 
     fn slice_color(plane: Plane, p: &Project, x: f64, y: f64, w: u32, h: u32) -> Oklch {
@@ -529,7 +703,7 @@ mod tests {
         println!(
             "3D: {}x MSAA, {} triangles on {}",
             gpu.surface_sample_count(),
-            gpu.index_count / 3,
+            gpu.chart.lock().unwrap().1.count / 3,
             gpu.adapter_name
         );
         let closeup = Project {

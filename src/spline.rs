@@ -511,8 +511,12 @@ impl Target {
 
 pub fn hit_test(spline: &Spline, p: Point, metric: Point) -> Option<Target> {
     let distance = |q: Point| ((q[0] - p[0]) * metric[0]).hypot((q[1] - p[1]) * metric[1]);
-    if let Some(i) = spline.nodes.iter().position(|n| distance(n.position) < 10.) {
-        return Some(Target::Anchor(i));
+    let mut closest: Option<(f64, Target)> = None;
+    for (i, node) in spline.nodes.iter().enumerate() {
+        let d = distance(node.position);
+        if d < 10. && closest.is_none_or(|(best, _)| d < best) {
+            closest = Some((d, Target::Anchor(i)));
+        }
     }
     if !spline.linear {
         for (i, n) in spline.nodes.iter().enumerate() {
@@ -522,13 +526,16 @@ pub fn hit_test(spline: &Spline, p: Point, metric: Point) -> Option<Target> {
                 {
                     continue;
                 }
-                if n.handle_position(side).is_some_and(|q| distance(q) < 9.) {
-                    return Some(Target::Handle(i, side));
+                if let Some(q) = n.handle_position(side) {
+                    let d = distance(q);
+                    if d < 9. && closest.is_none_or(|(best, _)| d < best) {
+                        closest = Some((d, Target::Handle(i, side)));
+                    }
                 }
             }
         }
     }
-    None
+    closest.map(|(_, target)| target)
 }
 
 /// Reapply every pointer update to the drag-start geometry. This prevents
@@ -538,6 +545,7 @@ pub struct Drag {
     initial: Spline,
     start: Point,
     axis: Option<usize>,
+    cyclic_x: bool,
 }
 impl Drag {
     pub fn new(initial: Spline, target: Target, start: Point) -> Self {
@@ -546,7 +554,12 @@ impl Drag {
             initial,
             start,
             axis: None,
+            cyclic_x: false,
         }
+    }
+    pub fn cyclic_x(mut self, enabled: bool) -> Self {
+        self.cyclic_x = enabled;
+        self
     }
     pub fn update(&mut self, p: Point, ctrl: bool, metric: Point) -> Spline {
         let mut result = self.initial.clone();
@@ -569,7 +582,11 @@ impl Drag {
                 } else {
                     self.axis = None;
                 }
-                let pos = add(self.initial.nodes[i].position, delta).map(|v| v.clamp(0., 1.));
+                let mut pos = add(self.initial.nodes[i].position, delta);
+                if !self.cyclic_x {
+                    pos[0] = pos[0].clamp(0., 1.);
+                }
+                pos[1] = pos[1].clamp(0., 1.);
                 result.move_node(i, pos);
             }
             Target::Handle(i, side) => {

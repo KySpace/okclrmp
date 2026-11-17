@@ -15,6 +15,7 @@ pub(crate) struct Vertex {
     pub color: [f32; 3],
 }
 
+#[derive(Clone)]
 pub(crate) struct Mesh {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
@@ -100,19 +101,14 @@ impl Mesh {
         }
     }
     fn triangle(&mut self, indices: [u32; 3]) {
-        let mut points = indices.map(|i| self.vertices[i as usize]);
-        let min = points
-            .iter()
-            .map(|v| v.position[0])
-            .fold(f32::INFINITY, f32::min);
-        let max = points
-            .iter()
-            .map(|v| v.position[0])
-            .fold(f32::NEG_INFINITY, f32::max);
+        let x = indices.map(|i| self.vertices[i as usize].position[0]);
+        let min = x[0].min(x[1]).min(x[2]);
+        let max = x[0].max(x[1]).max(x[2]);
         if max - min <= 0.9 {
-            self.indices.extend(indices);
+            self.indices.extend_from_slice(&indices);
             return;
         }
+        let mut points = indices.map(|i| self.vertices[i as usize]);
         // Unwrap and clip a hue-seam triangle; never stretch a face from 359°
         // back across the whole L/H floor to 0°.
         for p in &mut points {
@@ -194,7 +190,9 @@ fn clip(points: &[Vertex], low: bool) -> Vec<Vertex> {
     out
 }
 
-pub(crate) fn build() -> Mesh {
+/// Keep the source triangles uncut so a different hue chart can be made
+/// without resampling the RGB faces or losing the saturated creases.
+pub(crate) fn source() -> Mesh {
     let columns = edge_columns();
     let mut mesh = Mesh {
         vertices: Vec::with_capacity(columns.len() * ROWS),
@@ -230,11 +228,39 @@ pub(crate) fn build() -> Mesh {
             let b = a + ROWS as u32;
             let c = a + 1;
             let d = b + 1;
-            mesh.triangle([a, b, c]);
-            mesh.triangle([c, b, d]);
+            mesh.indices.extend([a, b, c, c, b, d]);
         }
     }
     mesh
+}
+impl Mesh {
+    pub fn chart(&self, origin: f64) -> Self {
+        let origin = (origin.rem_euclid(360.) / 360. * 1.8) as f32;
+        let vertices = self
+            .vertices
+            .iter()
+            .map(|v| Vertex {
+                position: [
+                    (v.position[0] + 0.9 - origin).rem_euclid(1.8) - 0.9,
+                    v.position[1],
+                    v.position[2],
+                ],
+                color: v.color,
+            })
+            .collect();
+        let mut chart = Self {
+            vertices,
+            indices: Vec::with_capacity(self.indices.len() + 4096),
+        };
+        for triangle in self.indices.as_chunks::<3>().0 {
+            chart.triangle(*triangle);
+        }
+        chart
+    }
+}
+#[cfg(test)]
+pub(crate) fn build() -> Mesh {
+    source().chart(0.)
 }
 
 #[cfg(test)]
@@ -286,5 +312,33 @@ mod tests {
         // inner intersection of the non-convex near-blue constant-hue slice.
         let blue = columns.iter().position(|p| p.rgb == [0., 0., 1.]).unwrap();
         assert_eq!(mesh.vertices[blue * ROWS + LOWER_STEPS].color, [0., 0., 1.]);
+    }
+    #[test]
+    fn moving_chart_seam_clips_faces_without_stretching_or_losing_rgb_creases() {
+        let source = source();
+        for origin in [17., 90., 180., 263., 359.9] {
+            let chart = source.chart(origin);
+            assert!(chart.vertices.iter().all(|v| {
+                v.position
+                    .iter()
+                    .chain(v.color.iter())
+                    .all(|v| v.is_finite())
+            }));
+            for triangle in chart.indices.as_chunks::<3>().0 {
+                let xs = triangle.map(|i| chart.vertices[i as usize].position[0]);
+                assert!(xs.into_iter().all(|x| (-0.900001..=0.900001).contains(&x)));
+                assert!(
+                    xs.into_iter().fold(f32::NEG_INFINITY, f32::max)
+                        - xs.into_iter().fold(f32::INFINITY, f32::min)
+                        <= 0.9
+                );
+            }
+            // Every original sample keeps its L, C and surface color.
+            for (a, b) in source.vertices.iter().zip(&chart.vertices) {
+                assert_eq!(a.position[1..], b.position[1..]);
+                assert_eq!(a.color, b.color);
+            }
+            assert!(chart.vertices.len() > source.vertices.len()); // clipped seam + closure
+        }
     }
 }

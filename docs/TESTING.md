@@ -6,15 +6,30 @@ Verified on Windows with Rust `1.101.0-nightly (249c1e4e3 2026-11-05)`, GPUI Kit
 
 | Check | Result |
 | --- | --- |
-| `cargo test --all-targets` | 16 core tests passed; GPU quality test is opt-in; binary test target built successfully |
+| `cargo test --all-targets` | 32 core tests passed; 2 GPU tests are opt-in; binary test target built successfully |
+| `cargo test --lib -- --ignored --nocapture` | Both hardware GPU tests passed on the RTX 4050 |
 | `cargo test -p accesskit_windows --lib unavailable_window_returns_uia_error_without_panicking` | 1 targeted teardown regression passed |
 | `cargo clippy --all-targets -- -D warnings` | Passed |
 | `cargo fmt --all --check` | Passed |
-| `cargo run -- --check-gpu` | Passed on the actual RTX 4050 |
+| `okclrmp-hue-preview.exe --check-gpu` | Passed on the actual RTX 4050; separate build preserves the running app |
 
-GPU validation checks 368 C–L, 512 C–H, and 555 L–H interior pixels against the Rust OKLCH → sRGB conversion (1,435 comparisons, ≤2 byte-level difference). Filtered graticule pixels and pixels whose footprint touches the gamut boundary are excluded from this pointwise check. The 3D render contains 8,532 distinctly colored surface pixels with 4× MSAA. Image size and alpha are also checked. Four images are written under `.research/gpu-check/`.
+GPU validation checks 368 C–L, 512 C–H, and 555 L–H interior pixels against the Rust OKLCH → sRGB conversion (1,435 comparisons, ≤2 byte-level difference). Filtered graticule pixels and pixels whose footprint touches the gamut boundary are excluded from this pointwise check. The 3D render contains 8,531 distinctly colored surface pixels with 4× MSAA. Image size and alpha are also checked. Four images are written under `.research/gpu-check/`.
 
-Core tests cover conversion reference values and roundtrips, gamut boundaries, expression precedence/ternaries/constants/errors/builtins, quadratic interpolation, spline channel ownership, slice intersections including jumps and tangencies, constant slice intervals, shortest-arc hue interpolation and 360° endpoints, saved project reproduction, import parsing, and output sample counts/endpoints/mapping policy.
+Core tests cover conversion reference values and roundtrips, gamut boundaries, expression precedence/ternaries/constants/errors/builtins, cubic spline geometry and editing, legacy quadratic migration, spline channel ownership, slice intersections including jumps and tangencies, constant slice intervals, shortest-arc hue interpolation and 360° endpoints, saved project reproduction, import parsing, and output sample counts/endpoints/mapping policy.
+
+## Cubic editing and cyclic hue
+
+Geometry tests independently check the global first and second derivatives at a nonuniform middle parameter. They cover the two-step Corner action, nearest Smooth alignment, unchanged aligned handles, independent opposite-handle lengths, Auto C2 followed by a C1 edit, equal-length smoothing, anchor translation, two/three-node symmetry, shape-preserving subdivision, linear mode, Ctrl axis/direction snapping, and modifier release without cumulative drift. Old quadratic JSON projects migrate without changing their samples in all three planes, including unwrapped hue.
+
+The cyclic view tests check shared hue panning modulo 360°, spline creation and anchor movement through hue zero, periodic handle hit targets, distinct selection of the 0°/360° endpoints, unchanged colormap exports after panning, and roundtripping the hue origin and polar flag. Polar geometry checks put every C=0 hue on the same vertical axis, keep chroma proportional to radius, and place white above black. The mesh regression moves the rectangular seam to five different hues, checks clipping and indices, and preserves each RGB boundary sample's lightness, chroma, and color.
+
+`cargo test --lib cyclic_hue_and_polar_views_render_on_gpu -- --ignored --nocapture` passed. C–H and L–H each matched 40,960 quarter-turn pixel comparisons with no pixels beyond the 2-byte tolerance. C–L stays identical when the hue origin moves. Both volume modes produce identical images after a full 360° shift. The CPU-projected white-axis endpoint coincides with the white tip in the polar GPU image. All output pixels are opaque, including the odd-sized 675×401 volume captures. Images under `.research/cyclic-hue/` were visually inspected.
+
+Four changed-origin renders at 675×240 measured 34.94 ms per rectangular render (including CPU seam clipping) and 1.94 ms per polar render on this adapter, including GPU work and readback. These debug-build measurements do not represent end-to-end native UI frame rates.
+
+The new middle-button gestures and toolbar were compiled, and their geometry/controller paths were tested. Native automation of the separate spline preview was unavailable because Computer Use app approval timed out; no native gesture pass is claimed for these additions.
+
+The main executable could not be replaced while the user's app was running (Windows error 5). A separate binary, `target/debug/okclrmp-hue-preview.exe`, built successfully from the current application sources and passed `--check-gpu`. The existing app session was left open.
 
 The AccessKit test is intentionally targeted; the other upstream AccessKit tests were not run.
 
@@ -36,7 +51,7 @@ Across 1,029 adaptive ridge columns, mean chroma loss relative to the true RGB c
 
 The existing app session remained open during this work. A separate native preview was built to avoid overwriting its locked executable. Computer Use permission for that preview was unavailable, so visual verification used the direct GPU captures instead of claiming a native-window screenshot check.
 
-## Native interaction checks
+## Native interaction checks — initial prototype
 
 | Scenario | Observed result |
 | --- | --- |

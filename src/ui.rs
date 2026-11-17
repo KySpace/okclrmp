@@ -220,6 +220,7 @@ struct StudioPanel {
     spline_drag: Option<Drag>,
     selected_node: Option<usize>,
     orbit_start: Option<Point<Pixels>>,
+    hue_pan_start: Option<Point<Pixels>>,
     export_space: ExportSpace,
     import_space: ImportSpace,
 }
@@ -236,6 +237,7 @@ impl StudioPanel {
             spline_drag: None,
             selected_node: None,
             orbit_start: None,
+            hue_pan_start: None,
             export_space: ExportSpace::Hex,
             import_space: ImportSpace::Hex,
         }
@@ -821,7 +823,12 @@ impl StudioPanel {
                     if a == 2 { "°" } else { "" }
                 )
             } else {
-                "H × L floor · C height".into()
+                if p.polar {
+                    "C radius · H azimuth · L up"
+                } else {
+                    "H × L floor · C height"
+                }
+                .into()
             })
             .flex_1(),
         );
@@ -844,19 +851,34 @@ impl StudioPanel {
                     .on_click(cx.listener(move |this, _, _, cx| this.enable_spline(plane, cx))),
             );
         } else {
-            header = header.child(
-                Button::new("reset-camera")
-                    .label("Reset view")
-                    .small()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.model.update(cx, |m, cx| {
-                            m.project.yaw = -0.65;
-                            m.project.pitch = 0.65;
-                            m.project.zoom = 1.;
-                            cx.notify();
-                        })
-                    })),
-            );
+            header = header
+                .child(
+                    Button::new("polar-view")
+                        .label("Polar")
+                        .small()
+                        .selected(p.polar)
+                        .tooltip("Lightness up · chroma radius · hue azimuth")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.model.update(cx, |m, cx| {
+                                m.project.polar = !m.project.polar;
+                                cx.notify();
+                            })
+                        })),
+                )
+                .child(
+                    Button::new("reset-camera")
+                        .label("Reset view")
+                        .small()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.model.update(cx, |m, cx| {
+                                m.project.yaw = -0.65;
+                                m.project.pitch = 0.65;
+                                m.project.zoom = 1.;
+                                m.project.hue_origin = 0.;
+                                cx.notify();
+                            })
+                        })),
+                );
         }
         let weak = cx.weak_entity();
         let canvas = canvas(
@@ -873,11 +895,16 @@ impl StudioPanel {
                     let mut key = vec![w as u64, h as u64];
                     if let Some(plane) = plane {
                         key.push(p.slices[plane.axes().2].to_bits());
+                        if plane.axes().0 == 2 {
+                            key.push(p.hue_origin.to_bits());
+                        }
                     } else {
                         key.extend([
                             p.yaw.to_bits() as u64,
                             p.pitch.to_bits() as u64,
                             p.zoom.to_bits() as u64,
+                            p.hue_origin.to_bits(),
+                            p.polar as u64,
                         ]);
                     }
                     if this.cache.as_ref().is_none_or(|(k, _)| *k != key) {
@@ -945,6 +972,11 @@ impl StudioPanel {
                 )
             };
             bottom = bottom
+                .when(plane.axes().0 == 2, |el| {
+                    el.child(caption(
+                        "Middle-drag = pan cyclic hue · linked to the other hue views",
+                    ))
+                })
                 .when(p.mode == Mode::Spline(plane), |el| {
                     el.child(caption(
                         "Drag circles = nodes · squares = handles · Ctrl = axis / direction snap",
@@ -958,11 +990,13 @@ impl StudioPanel {
         } else {
             bottom = bottom
                 .child(caption(
-                    "Drag to orbit · scroll to zoom · coral dashes = out of gamut",
+                    "Left-drag = orbit · middle-drag = hue origin · scroll = zoom",
                 ))
-                .child(caption(
-                    "Surface color = maximum chroma at each lightness and hue",
-                ));
+                .child(caption(if p.polar {
+                    "C=0 is the vertical axis · white up · coral dashes = out of gamut"
+                } else {
+                    "Surface color = maximum chroma · coral dashes = out of gamut"
+                }));
         }
         let mut content = column()
             .size_full()
@@ -999,8 +1033,30 @@ impl StudioPanel {
                     .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                         if event.pressed_button == Some(MouseButton::Left) {
                             this.mouse_move(event.position, event.modifiers.control, cx);
+                        } else if event.pressed_button == Some(MouseButton::Middle) {
+                            this.pan_hue(event.position, cx);
                         }
                     }))
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                            if matches!(
+                                this.kind,
+                                Kind::Plot(None) | Kind::Plot(Some(Plane::Ch | Plane::Lh))
+                            ) {
+                                this.hue_pan_start = Some(event.position);
+                                cx.stop_propagation();
+                            }
+                        }),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Middle,
+                        cx.listener(|this, _, _, _| this.hue_pan_start = None),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Middle,
+                        cx.listener(|this, _, _, _| this.hue_pan_start = None),
+                    )
                     .on_mouse_up(
                         MouseButton::Left,
                         cx.listener(|this, _, _, _| {
@@ -1054,9 +1110,14 @@ impl StudioPanel {
         {
             let w = f32::from(self.bounds.size.width) as f64;
             let h = f32::from(self.bounds.size.height) as f64;
-            if let Some(target) = spline::hit_test(spline, p, [w, h]) {
+            let hit = plane
+                .spline_images(spline, m.project.hue_origin)
+                .iter()
+                .find_map(|image| spline::hit_test(image, p, [w, h]));
+            if let Some(target) = hit {
                 self.selected_node = Some(target.node());
-                self.spline_drag = Some(Drag::new(spline.clone(), target, p));
+                self.spline_drag =
+                    Some(Drag::new(spline.clone(), target, p).cyclic_x(plane.axes().0 == 2));
                 window.focus(&self.focus, cx);
                 cx.notify();
                 return;
@@ -1068,7 +1129,7 @@ impl StudioPanel {
             .into_iter()
             .min_by(|a, b| {
                 let dist = |s: &Sample| {
-                    let q = plane.project(s.color);
+                    let q = plane.project_at(s.color, m.project.hue_origin);
                     (q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2)
                 };
                 dist(a).total_cmp(&dist(b))
@@ -1104,6 +1165,16 @@ impl StudioPanel {
             self.model.update(cx, |m, cx| {
                 m.project.spline = Some(spline);
                 m.rebuild(cx);
+            });
+        }
+    }
+    fn pan_hue(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        if let Some(previous) = self.hue_pan_start {
+            let dx = f32::from(pos.x - previous.x) / f32::from(self.bounds.size.width).max(1.);
+            self.hue_pan_start = Some(pos);
+            self.model.update(cx, |m, cx| {
+                m.project.pan_hue(dx as f64);
+                cx.notify();
             });
         }
     }
@@ -1204,7 +1275,7 @@ fn paint_plot(
     let aspect = f32::from(bounds.size.width) / f32::from(bounds.size.height).max(1.);
     let project = |c: Oklch| -> Option<Point<Pixels>> {
         let q = if let Some(plane) = plane {
-            plane.project(c)
+            plane.project_at(c, p.hue_origin)
         } else {
             gpu::project3(c, p, aspect)?
         };
@@ -1221,7 +1292,7 @@ fn paint_plot(
         for i in 0..=4 {
             let v = i as f32 / 4.;
             let x_label = if x == 2 {
-                format!("{}°", i * 90)
+                format!("{:.0}°", (p.hue_origin + i as f64 * 90.).rem_euclid(360.))
             } else {
                 format!("{v:.2}")
             };
@@ -1267,11 +1338,74 @@ fn paint_plot(
             window,
             cx,
         );
+        if x == 2 {
+            let zero =
+                bounds.left() + bounds.size.width * model::hue_position(0., p.hue_origin) as f32;
+            line(
+                point(zero, bounds.top()),
+                point(zero, bounds.bottom()),
+                1.,
+                0x344151,
+                window,
+            );
+            label(
+                "0°".into(),
+                point(zero + px(4.), bounds.top() + px(2.)),
+                0xc6b3e8,
+                window,
+                cx,
+            );
+        }
+    } else if p.polar {
+        let axis_color = 0xaacfe5;
+        if let (Some(a), Some(b)) = (
+            project(Oklch::new(0., 0., 0.)),
+            project(Oklch::new(1., 0., 0.)),
+        ) {
+            line(a, b, 1.3, axis_color, window);
+            label(
+                "L=1 · white".into(),
+                point(b.x + px(7.), b.y - px(15.)),
+                TEXT,
+                window,
+                cx,
+            );
+            label("L=0".into(), point(a.x + px(7.), a.y), MUTED, window, cx);
+        }
+        for i in 0..96 {
+            let h = i as f64 * 360. / 96.;
+            if let (Some(a), Some(b)) = (
+                project(Oklch::new(0., 0.4, h)),
+                project(Oklch::new(0., 0.4, h + 360. / 96.)),
+            ) {
+                line(a, b, 1., BORDER, window);
+            }
+        }
+        for h in [0., 90., 180., 270.] {
+            if let (Some(a), Some(b)) = (
+                project(Oklch::new(0., 0., h)),
+                project(Oklch::new(0., 0.4, h)),
+            ) {
+                line(a, b, 1., BORDER, window);
+                label(format!("{h:.0}°"), b, MUTED, window, cx);
+                if h == 0. {
+                    circle(b, 4., rgb(0xc6b3e8).into(), None, window);
+                }
+            }
+        }
     } else {
         // Bounding box and coordinate axes make the rectangular L–H floor explicit.
         for &(a, b, color) in &[
-            (Oklch::new(0., 0., 0.), Oklch::new(1., 0., 0.), 0xaacfe5),
-            (Oklch::new(0., 0., 0.), Oklch::new(0., 0.4, 0.), 0xe4c27e),
+            (
+                Oklch::new(0., 0., p.hue_origin),
+                Oklch::new(1., 0., p.hue_origin),
+                0xaacfe5,
+            ),
+            (
+                Oklch::new(0., 0., p.hue_origin),
+                Oklch::new(0., 0.4, p.hue_origin),
+                0xe4c27e,
+            ),
         ] {
             if let (Some(a), Some(b)) = (project(a), project(b)) {
                 line(a, b, 1., color, window);
@@ -1299,6 +1433,16 @@ fn paint_plot(
             (glam::Vec3::new(-0.9, 0.92, -0.65), "C", 0xe4c27e),
         ] {
             label(s.into(), project_world(v), col, window, cx);
+        }
+        if let Some(zero) = project(Oklch::new(0., 0., 0.)) {
+            circle(zero, 4., rgb(0xc6b3e8).into(), None, window);
+            label(
+                "0°".into(),
+                point(zero.x + px(6.), zero.y),
+                0xc6b3e8,
+                window,
+                cx,
+            );
         }
     }
     for col in &p.imported {
@@ -1347,7 +1491,7 @@ fn paint_plot(
     for pair in samples.windows(2) {
         let a = pair[0].color;
         let b = pair[1].color;
-        if !model::connected(a, b) {
+        if !p.connected_in_view(a, b, plane) {
             flush(&mut points, last_outside, &mut strokes);
             continue;
         }
@@ -1395,7 +1539,11 @@ fn paint_plot(
             )
         };
         if spline.symmetric {
-            let x = spline.axis();
+            let x = if plane.axes().0 == 2 {
+                model::hue_position(spline.axis() * 360., p.hue_origin)
+            } else {
+                spline.axis()
+            };
             let height = f32::from(bounds.size.height);
             for i in 0..(height / 10.).ceil() as usize {
                 let t = i as f64 * 10. / height as f64;
@@ -1408,55 +1556,65 @@ fn paint_plot(
                 );
             }
         }
-        if !spline.linear {
-            for (i, node) in spline.nodes.iter().enumerate() {
-                for side in [Side::Incoming, Side::Outgoing] {
-                    if (i == 0 && side == Side::Incoming)
-                        || (i == spline.nodes.len() - 1 && side == Side::Outgoing)
-                    {
-                        continue;
-                    }
-                    if let Some(handle) = node.handle_position(side) {
-                        let pos = screen(handle);
-                        line(screen(node.position), pos, 1.2, ACCENT, window);
-                        let mut square = fill(
-                            Bounds::new(
-                                point(pos.x - px(4.), pos.y - px(4.)),
-                                size(px(8.), px(8.)),
-                            ),
-                            rgb(ACCENT),
-                        );
-                        square.border_widths = Edges::all(px(1.));
-                        square.border_color = rgb(0x102018).into();
-                        window.paint_quad(square);
+        for (copy, image) in plane
+            .spline_images(spline, p.hue_origin)
+            .into_iter()
+            .enumerate()
+        {
+            let spline = &image;
+            if !spline.linear {
+                for (i, node) in spline.nodes.iter().enumerate() {
+                    for side in [Side::Incoming, Side::Outgoing] {
+                        if (i == 0 && side == Side::Incoming)
+                            || (i == spline.nodes.len() - 1 && side == Side::Outgoing)
+                        {
+                            continue;
+                        }
+                        if let Some(handle) = node.handle_position(side) {
+                            let pos = screen(handle);
+                            line(screen(node.position), pos, 1.2, ACCENT, window);
+                            let mut square = fill(
+                                Bounds::new(
+                                    point(pos.x - px(4.), pos.y - px(4.)),
+                                    size(px(8.), px(8.)),
+                                ),
+                                rgb(ACCENT),
+                            );
+                            square.border_widths = Edges::all(px(1.));
+                            square.border_color = rgb(0x102018).into();
+                            window.paint_quad(square);
+                        }
                     }
                 }
             }
-        }
-        for (i, node) in spline.nodes.iter().enumerate() {
-            let pos = screen(node.position);
-            circle(
-                pos,
-                7.,
-                rgb(if selected == Some(i) {
-                    ACCENT
-                } else {
-                    0x0f171d
-                })
-                .into(),
-                Some((2., rgb(ACCENT).into())),
-                window,
-            );
-            // Keep endpoint labels inside the viewport.
-            let dx = if node.position[0] > 0.94 { -20. } else { 10. };
-            let dy = if node.position[1] > 0.94 { 8. } else { -20. };
-            label(
-                (i + 1).to_string(),
-                point(pos.x + px(dx), pos.y + px(dy)),
-                ACCENT,
-                window,
-                cx,
-            );
+            for (i, node) in spline.nodes.iter().enumerate() {
+                if copy != 0 {
+                    continue;
+                }
+                let pos = screen(node.position);
+                circle(
+                    pos,
+                    7.,
+                    rgb(if selected == Some(i) {
+                        ACCENT
+                    } else {
+                        0x0f171d
+                    })
+                    .into(),
+                    Some((2., rgb(ACCENT).into())),
+                    window,
+                );
+                // Keep endpoint labels inside the viewport.
+                let dx = if node.position[0] > 0.94 { -20. } else { 10. };
+                let dy = if node.position[1] > 0.94 { 8. } else { -20. };
+                label(
+                    (i + 1).to_string(),
+                    point(pos.x + px(dx), pos.y + px(dy)),
+                    ACCENT,
+                    window,
+                    cx,
+                );
+            }
         }
     }
     for (i, slice) in Plane::ALL.into_iter().enumerate() {

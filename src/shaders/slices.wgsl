@@ -22,8 +22,8 @@ fn decode(v: vec3<f32>) -> vec3<f32> {
 }
 fn slice_rgb(uv: vec2<f32>) -> vec3<f32> {
     var lch = vec3(uv.x,(1.0-uv.y)*0.4,p.slice.z);
-    if p.size_plane.z>0.5 && p.size_plane.z<1.5 { lch = vec3(p.slice.x,(1.0-uv.y)*0.4,uv.x*360.0); }
-    if p.size_plane.z>1.5 { lch = vec3(1.0-uv.y,p.slice.y,uv.x*360.0); }
+    if p.size_plane.z>0.5 && p.size_plane.z<1.5 { lch = vec3(p.slice.x,(1.0-uv.y)*0.4,(uv.x+p.size_plane.w)*360.0); }
+    if p.size_plane.z>1.5 { lch = vec3(1.0-uv.y,p.slice.y,(uv.x+p.size_plane.w)*360.0); }
     return linear_rgb(lch);
 }
 @compute @workgroup_size(8,8)

@@ -40,10 +40,35 @@ impl Plane {
         let (x, y, _) = self.axes();
         [normalized(c.channel(x), x), normalized(c.channel(y), y)]
     }
+    pub fn project_at(self, c: Oklch, hue_origin: f64) -> [f64; 2] {
+        let mut point = self.project(c);
+        if self.axes().0 == 2 {
+            point[0] = hue_position(c.h, hue_origin);
+        }
+        point
+    }
     pub fn from_point(self, p: [f64; 2]) -> [f64; 2] {
         let (x, y, _) = self.axes();
         [denormalized(p[0], x), denormalized(p[1], y)]
     }
+    pub fn spline_images(self, spline: &Spline, hue_origin: f64) -> Vec<Spline> {
+        if self.axes().0 != 2 {
+            return vec![spline.clone()];
+        }
+        [0., -1., 1.]
+            .into_iter()
+            .map(|shift| {
+                let mut image = spline.clone();
+                for node in &mut image.nodes {
+                    node.position[0] = hue_position(node.position[0] * 360., hue_origin) + shift;
+                }
+                image
+            })
+            .collect()
+    }
+}
+pub fn hue_position(hue: f64, origin: f64) -> f64 {
+    normalized(hue - origin.rem_euclid(360.), 2)
 }
 pub fn normalized(v: f64, a: usize) -> f64 {
     match a {
@@ -96,6 +121,11 @@ pub struct Project {
     pub yaw: f32,
     pub pitch: f32,
     pub zoom: f32,
+    /// Shared hue chart origin, in degrees. Curves retain unwrapped hue.
+    #[serde(default)]
+    pub hue_origin: f64,
+    #[serde(default)]
+    pub polar: bool,
 }
 impl Default for Project {
     fn default() -> Self {
@@ -162,6 +192,8 @@ impl Project {
             yaw: -0.65,
             pitch: 0.65,
             zoom: 1.,
+            hue_origin: 0.,
+            polar: false,
         };
         project.migrate_spline().expect("valid preset spline");
         project
@@ -198,6 +230,7 @@ impl Project {
             || !self.yaw.is_finite()
             || !self.pitch.is_finite()
             || !self.zoom.is_finite()
+            || !self.hue_origin.is_finite()
         {
             return Err("Project contains non-finite view values".into());
         }
@@ -272,6 +305,18 @@ impl Project {
         self.spline = Some(Spline::from_legacy(&points));
         self.nodes.clear();
         self.mode = Mode::Spline(plane);
+    }
+    pub fn pan_hue(&mut self, horizontal_fraction: f64) {
+        self.hue_origin = (self.hue_origin - horizontal_fraction * 360.).rem_euclid(360.);
+    }
+    pub fn connected_in_view(&self, a: Oklch, b: Oklch, plane: Option<Plane>) -> bool {
+        connected(a, b)
+            && if plane.is_some_and(|p| p.axes().0 == 2) || (plane.is_none() && !self.polar) {
+                (hue_position(a.h, self.hue_origin) - hue_position(b.h, self.hue_origin)).abs()
+                    < 0.5
+            } else {
+                true
+            }
     }
 }
 #[derive(Clone, Debug)]
@@ -444,7 +489,7 @@ pub fn connected(a: Oklch, b: Oklch) -> bool {
         && b.finite()
         && (a.l - b.l).abs() < 0.1
         && (a.c - b.c).abs() < 0.05
-        && (normalized(a.h, 2) - normalized(b.h, 2)).abs() < 30. / 360.
+        && ((b.h - a.h + 180.).rem_euclid(360.) - 180.).abs() < 30.
 }
 
 #[cfg(test)]
@@ -537,7 +582,12 @@ mod tests {
                     .take(count)
                     .map(|p| plane.from_point(*p))
                     .collect();
-                let p = Project {mode: Mode::Spline(plane), spline: None, nodes: raw.clone(), ..Default::default()};
+                let p = Project {
+                    mode: Mode::Spline(plane),
+                    spline: None,
+                    nodes: raw.clone(),
+                    ..Default::default()
+                };
                 // No new spline field is present in the old JSON format.
                 let encoded = serde_json::to_string(&p).unwrap();
                 assert!(!encoded.contains("\"spline\""));
@@ -574,6 +624,100 @@ mod tests {
         }
     }
     #[test]
+    fn hue_views_pan_periodically_without_changing_curve_or_export() {
+        let mut p = Project::preset(1);
+        p.expressions = ["0.6".into(), "0.1".into(), "350+20*t".into()];
+        let original = p.compile().unwrap();
+        p.pan_hue(1. / 6.);
+        assert!((p.hue_origin - 300.).abs() < 1e-10);
+        for plane in [Plane::Ch, Plane::Lh] {
+            let a = plane.project_at(original.at(0.), p.hue_origin);
+            let b = plane.project_at(original.at(1.), p.hue_origin);
+            assert!((b[0] - a[0] - 20. / 360.).abs() < 1e-10);
+            for pair in original.sample(101).windows(2) {
+                assert!(p.connected_in_view(pair[0].color, pair[1].color, Some(plane)));
+            }
+        }
+        p.pan_hue(4.);
+        assert!((p.hue_origin - 300.).abs() < 1e-10);
+        p.polar = true;
+        for plane in [Plane::Ch, Plane::Lh] {
+            let mut spline = p.clone();
+            spline.enable_spline(plane, &original);
+            let converted = spline.compile().unwrap();
+            for i in 0..=100 {
+                assert!(
+                    (converted.at(i as f64 / 100.).h - original.at(i as f64 / 100.).h).abs() < 1e-9
+                );
+            }
+        }
+        let before =
+            crate::exchange::export(&original, 31, crate::exchange::ExportSpace::Oklch, false);
+        let after = crate::exchange::export(
+            &p.compile().unwrap(),
+            31,
+            crate::exchange::ExportSpace::Oklch,
+            false,
+        );
+        assert_eq!(before, after);
+        let restored: Project = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(restored.hue_origin, p.hue_origin);
+        assert!(restored.polar);
+        let mut json = serde_json::to_value(&p).unwrap();
+        json.as_object_mut().unwrap().remove("hue_origin");
+        json.as_object_mut().unwrap().remove("polar");
+        let old: Project = serde_json::from_value(json).unwrap();
+        assert_eq!(old.hue_origin, 0.);
+        assert!(!old.polar);
+    }
+    #[test]
+    fn spline_drag_across_zero_uses_unwrapped_hue_and_periodic_handle_hits() {
+        use crate::spline::{Drag, Side, Target, hit_test};
+        for plane in [Plane::Ch, Plane::Lh] {
+            let s = Spline::from_legacy(&[[350. / 360., 0.2], [1., 0.4], [370. / 360., 0.3]]);
+            let copies = plane.spline_images(&s, 300.);
+            let anchor = plane.project_at(Oklch::new(0.2, 0.08, 350.), 300.);
+            assert!(
+                copies
+                    .iter()
+                    .any(|s| hit_test(s, anchor, [900., 400.]) == Some(Target::Anchor(0)))
+            );
+            let mut drag = Drag::new(s.clone(), Target::Anchor(0), anchor).cyclic_x(true);
+            let moved = drag.update([anchor[0] + 30. / 360., anchor[1]], false, [900., 400.]);
+            assert!((moved.nodes[0].position[0] * 360. - 380.).abs() < 1e-10);
+            assert_eq!(moved.nodes[0].outgoing, s.nodes[0].outgoing);
+            let start = s.nodes[1].handle_position(Side::Outgoing).unwrap();
+            let image = plane.spline_images(&s, 300.).remove(0);
+            let pos = image.nodes[1].handle_position(Side::Outgoing).unwrap();
+            assert!((pos[0] - (start[0] - 300. / 360.)).abs() < 1e-10);
+            let zero_copies = plane.spline_images(&s, 0.);
+            let wrapped_handle = zero_copies[1].nodes[1]
+                .handle_position(Side::Outgoing)
+                .unwrap();
+            assert_eq!(
+                zero_copies
+                    .iter()
+                    .find_map(|s| hit_test(s, wrapped_handle, [900., 400.])),
+                Some(Target::Handle(1, Side::Outgoing))
+            );
+            let full = Spline::line([0., 0.3], [1., 0.3]);
+            let images = plane.spline_images(&full, 0.);
+            assert_eq!(
+                images
+                    .iter()
+                    .find_map(|s| hit_test(s, [0., 0.3], [900., 400.])),
+                Some(Target::Anchor(0))
+            );
+            assert_eq!(
+                images
+                    .iter()
+                    .find_map(|s| hit_test(s, [1., 0.3], [900., 400.])),
+                Some(Target::Anchor(1))
+            );
+            assert_eq!(hue_position(450., 90.), hue_position(450., 450.));
+        }
+    }
+    #[test]
     fn imported_hue_uses_the_short_arc_and_projection_keeps_360_endpoint() {
         let p = Project {
             mode: Mode::Imported,
@@ -586,7 +730,8 @@ mod tests {
         assert!((middle.l - 0.6).abs() < 1e-10);
         assert_eq!(Plane::Ch.project(middle)[0], 1.);
         assert!(connected(c.at(0.49), middle));
-        assert!(!connected(middle, c.at(0.51)));
+        assert!(connected(middle, c.at(0.51)));
+        assert!(!p.connected_in_view(middle, c.at(0.51), Some(Plane::Ch)));
         assert!(
             c.intersections(Plane::Cl, 0.)
                 .points
