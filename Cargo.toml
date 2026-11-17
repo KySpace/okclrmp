@@ -1,0 +1,39 @@
+[package]
+name = "okclrmp"
+version = "0.1.0"
+edition = "2024"
+description = "An OKLCH colormap workbench"
+license = "MIT"
+
+[workspace]
+members = ["vendor/accesskit_windows"]
+default-members = ["."]
+resolver = "3"
+
+[dependencies]
+gpui-kit = "=0.10.0"
+anyhow = "1"
+bytemuck = { version = "1", features = ["derive"] }
+glam = { version = "0.30", features = ["bytemuck"] }
+wgpu = "30.0.1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+pollster = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole"] }
+
+[patch.crates-io]
+accesskit_windows = { path = "vendor/accesskit_windows" }
+
+[profile.dev]
+debug = 0
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+

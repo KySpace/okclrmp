@@ -1,0 +1,516 @@
+use crate::{
+    color::Oklch,
+    expr::{self, Expr},
+};
+use serde::{Deserialize, Serialize};
+
+pub const C_MAX: f64 = 0.4;
+pub const CURVE_SAMPLES: usize = 1025;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Plane {
+    Cl,
+    Ch,
+    Lh,
+}
+impl Plane {
+    pub const ALL: [Self; 3] = [Self::Cl, Self::Ch, Self::Lh];
+    pub fn axes(self) -> (usize, usize, usize) {
+        match self {
+            Self::Cl => (0, 1, 2),
+            Self::Ch => (2, 1, 0),
+            Self::Lh => (2, 0, 1),
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Cl => "Chroma · Lightness",
+            Self::Ch => "Chroma · Hue",
+            Self::Lh => "Lightness · Hue",
+        }
+    }
+    pub fn short(self) -> &'static str {
+        match self {
+            Self::Cl => "C–L",
+            Self::Ch => "C–H",
+            Self::Lh => "L–H",
+        }
+    }
+    pub fn project(self, c: Oklch) -> [f64; 2] {
+        let (x, y, _) = self.axes();
+        [normalized(c.channel(x), x), normalized(c.channel(y), y)]
+    }
+    pub fn from_point(self, p: [f64; 2]) -> [f64; 2] {
+        let (x, y, _) = self.axes();
+        [denormalized(p[0], x), denormalized(p[1], y)]
+    }
+}
+pub fn normalized(v: f64, a: usize) -> f64 {
+    match a {
+        1 => v / C_MAX,
+        2 => {
+            let wrapped = v.rem_euclid(360.);
+            if v > 0. && wrapped < 1e-10 {
+                1.
+            } else {
+                wrapped / 360.
+            }
+        }
+        _ => v,
+    }
+}
+pub fn denormalized(v: f64, a: usize) -> f64 {
+    v * match a {
+        1 => C_MAX,
+        2 => 360.,
+        _ => 1.,
+    }
+}
+pub fn axis_name(a: usize) -> &'static str {
+    ["L", "C", "H"][a]
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum Mode {
+    Expressions,
+    Spline(Plane),
+    Imported,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Project {
+    pub name: String,
+    pub parameter: String,
+    pub constants: String,
+    pub expressions: [String; 3],
+    pub mode: Mode,
+    pub nodes: Vec<[f64; 2]>,
+    pub imported: Vec<Oklch>,
+    pub slices: [f64; 3],
+    pub cursor: f64,
+    pub sample_count: usize,
+    pub map_chroma: bool,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub zoom: f32,
+}
+impl Default for Project {
+    fn default() -> Self {
+        Self::preset(0)
+    }
+}
+impl Project {
+    pub fn preset(i: usize) -> Self {
+        let (name, constants, expressions, mode, nodes) = match i {
+            1 => (
+                "Linear sweep",
+                "l_min=0.25; l_max=0.9; c_min=0.04; c_max=0.18; h_min=285; h_max=35",
+                [
+                    "l_min + (l_max-l_min)*t",
+                    "c_min + (c_max-c_min)*t",
+                    "h_min + (h_max-h_min)*t",
+                ],
+                Mode::Expressions,
+                vec![],
+            ),
+            2 => (
+                "Diverging · ember / iris",
+                "c_max=0.30",
+                [
+                    "1 - 0.36*2*abs(t - 0.5)",
+                    "abs(t - 0.5)*c_max",
+                    "t < 0.5 ? 15 : 263",
+                ],
+                Mode::Expressions,
+                vec![],
+            ),
+            3 => (
+                "Turbo · spectral study",
+                "l_max=0.92; l_range=0.52",
+                [
+                    "l_max-l_range*2*abs(t-0.5)",
+                    "0.06 + 0.16*abs(sin(2*pi*t))",
+                    "300 - 280*t - 25*sin(2*pi*t)",
+                ],
+                Mode::Expressions,
+                vec![],
+            ),
+            _ => (
+                "Monochrome · moss",
+                "hue=136.59",
+                ["t", "0.6*t*(1-t)", "hue"],
+                Mode::Spline(Plane::Cl),
+                vec![[0., 0.], [0.5, 0.15], [1., 0.]],
+            ),
+        };
+        Self {
+            name: name.into(),
+            parameter: "t".into(),
+            constants: constants.into(),
+            expressions: expressions.map(str::to_string),
+            mode,
+            nodes,
+            imported: vec![],
+            slices: [0.65, 0.10, 136.59],
+            cursor: 0.5,
+            sample_count: 256,
+            map_chroma: true,
+            yaw: -0.65,
+            pitch: 0.65,
+            zoom: 1.,
+        }
+    }
+    pub fn compile(&self) -> Result<Curve, String> {
+        if !self.cursor.is_finite()
+            || self.slices.iter().any(|x| !x.is_finite())
+            || !self.yaw.is_finite()
+            || !self.pitch.is_finite()
+            || !self.zoom.is_finite()
+        {
+            return Err("Project contains non-finite view values".into());
+        }
+        if !(0. ..=1.).contains(&self.cursor)
+            || !(0. ..=1.).contains(&self.slices[0])
+            || !(0. ..=C_MAX).contains(&self.slices[1])
+            || !(0. ..=360.).contains(&self.slices[2])
+            || !(0.5..=2.5).contains(&self.zoom)
+            || !(0.12..=1.45).contains(&self.pitch)
+        {
+            return Err("Project view settings are outside the supported ranges".into());
+        }
+        if !(2..=4096).contains(&self.sample_count)
+            || self.imported.len() > 16384
+            || self.imported.iter().any(|c| !c.finite())
+        {
+            return Err("Project has invalid samples or reference colors".into());
+        }
+        let constants = expr::constants(&self.constants, &self.parameter)?;
+        let mut channels = Vec::new();
+        for a in 0..3 {
+            let used = match self.mode {
+                Mode::Expressions => true,
+                Mode::Spline(p) => a == p.axes().2,
+                Mode::Imported => false,
+            };
+            channels.push(if used {
+                expr::compile(&self.expressions[a], &self.parameter, &constants)
+                    .map_err(|e| format!("{}: {e}", axis_name(a)))?
+            } else {
+                Expr::Number(0.)
+            });
+        }
+        if matches!(self.mode, Mode::Spline(_))
+            && (!(2..=3).contains(&self.nodes.len())
+                || self.nodes.iter().flatten().any(|x| !x.is_finite()))
+        {
+            return Err("A spline needs two or three finite nodes".into());
+        }
+        if matches!(self.mode, Mode::Imported)
+            && (self.imported.len() < 2 || self.imported.iter().any(|p| !p.finite()))
+        {
+            return Err("Import at least two finite colors first".into());
+        }
+        let curve = Curve {
+            channels: channels.try_into().unwrap(),
+            mode: self.mode.clone(),
+            nodes: self.nodes.clone(),
+            imported: self.imported.clone(),
+        };
+        for i in 0..CURVE_SAMPLES {
+            let t = i as f64 / (CURVE_SAMPLES - 1) as f64;
+            if !curve.at(t).finite() {
+                return Err(format!(
+                    "Expression is undefined at {} = {t:.5}",
+                    self.parameter
+                ));
+            }
+        }
+        Ok(curve)
+    }
+    pub fn enable_spline(&mut self, plane: Plane, curve: &Curve) {
+        if self.mode == Mode::Spline(plane) {
+            return;
+        }
+        self.nodes = [0., 0.5, 1.]
+            .into_iter()
+            .map(|t| {
+                let p = curve.at(t);
+                let (x, y, _) = plane.axes();
+                [p.channel(x), p.channel(y)]
+            })
+            .collect();
+        self.mode = Mode::Spline(plane);
+    }
+}
+#[derive(Clone, Debug)]
+pub struct Curve {
+    channels: [Expr; 3],
+    pub mode: Mode,
+    pub nodes: Vec<[f64; 2]>,
+    imported: Vec<Oklch>,
+}
+#[derive(Clone, Copy, Debug)]
+pub struct Sample {
+    pub t: f64,
+    pub color: Oklch,
+}
+#[derive(Clone, Debug)]
+pub struct Intersections {
+    pub points: Vec<Sample>,
+    pub coplanar: bool,
+}
+impl Curve {
+    pub fn at(&self, t: f64) -> Oklch {
+        let t = t.clamp(0., 1.);
+        if self.mode == Mode::Imported {
+            let f = t * (self.imported.len() - 1) as f64;
+            let i = (f.floor() as usize).min(self.imported.len() - 2);
+            let k = f - i as f64;
+            let a = self.imported[i];
+            let b = self.imported[i + 1];
+            let dh = (b.h - a.h + 180.).rem_euclid(360.) - 180.;
+            return Oklch::new(a.l + (b.l - a.l) * k, a.c + (b.c - a.c) * k, a.h + dh * k);
+        }
+        let mut c = Oklch::new(
+            self.channels[0].eval(t),
+            self.channels[1].eval(t),
+            self.channels[2].eval(t),
+        );
+        if let Mode::Spline(plane) = self.mode {
+            let p = interpolate(&self.nodes, t);
+            let (x, y, _) = plane.axes();
+            c.set_channel(x, p[0]);
+            c.set_channel(y, p[1]);
+        }
+        c
+    }
+    pub fn sample(&self, n: usize) -> Vec<Sample> {
+        (0..n)
+            .map(|i| {
+                let t = i as f64 / (n - 1).max(1) as f64;
+                Sample {
+                    t,
+                    color: self.at(t),
+                }
+            })
+            .collect()
+    }
+    pub fn intersections(&self, plane: Plane, slice: f64) -> Intersections {
+        let axis = plane.axes().2;
+        let samples = self.sample(CURVE_SAMPLES);
+        let distance = |c: Oklch| {
+            let d = c.channel(axis) - slice;
+            if axis == 2 {
+                (d + 180.).rem_euclid(360.) - 180.
+            } else {
+                d
+            }
+        };
+        let eps = if axis == 2 { 1e-7 } else { 1e-10 };
+        if samples.iter().all(|s| distance(s.color).abs() < eps) {
+            return Intersections {
+                points: vec![],
+                coplanar: true,
+            };
+        }
+        let mut roots: Vec<Sample> = vec![];
+        // A constant sub-interval contributes its endpoints, not thousands of labels.
+        let mut i = 0;
+        while i < samples.len() {
+            if distance(samples[i].color).abs() < eps {
+                let start = i;
+                while i + 1 < samples.len() && distance(samples[i + 1].color).abs() < eps {
+                    i += 1;
+                }
+                roots.push(samples[start]);
+                if i > start {
+                    roots.push(samples[i]);
+                }
+            }
+            i += 1;
+        }
+        for pair in samples.windows(2) {
+            let a = pair[0];
+            let b = pair[1];
+            let da = distance(a.color);
+            let db = distance(b.color);
+            if da.abs() >= eps
+                && db.abs() >= eps
+                && da * db < 0.
+                && (axis != 2 || (da - db).abs() < 180.)
+            {
+                let (mut lo, mut hi) = (a.t, b.t);
+                let mut dl = da;
+                for _ in 0..40 {
+                    let m = (lo + hi) * 0.5;
+                    let d = distance(self.at(m));
+                    if dl * d <= 0. {
+                        hi = m;
+                    } else {
+                        lo = m;
+                        dl = d;
+                    }
+                }
+                let t = (lo + hi) * 0.5;
+                let color = self.at(t);
+                // A ternary jump can straddle the slice without ever intersecting it.
+                if distance(color).abs() < eps * 10. {
+                    roots.push(Sample { t, color });
+                }
+            }
+        }
+        // Tangencies need not occur exactly on a sample or change sign. Minimize
+        // the residual around local extrema and verify the actual curve value.
+        for triple in samples.windows(3) {
+            let [a, b, c] = [triple[0], triple[1], triple[2]];
+            let [da, db, dc] = [distance(a.color), distance(b.color), distance(c.color)];
+            if db.abs() > eps
+                && da * db > 0.
+                && db * dc > 0.
+                && db.abs() < da.abs()
+                && db.abs() < dc.abs()
+            {
+                let (mut lo, mut hi) = (a.t, c.t);
+                for _ in 0..48 {
+                    let x = lo + (hi - lo) / 3.;
+                    let y = hi - (hi - lo) / 3.;
+                    if distance(self.at(x)).abs() < distance(self.at(y)).abs() {
+                        hi = y;
+                    } else {
+                        lo = x;
+                    }
+                }
+                let t = (lo + hi) * 0.5;
+                let color = self.at(t);
+                if distance(color).abs() < eps {
+                    roots.push(Sample { t, color });
+                }
+            }
+        }
+        roots.sort_by(|a, b| a.t.total_cmp(&b.t));
+        roots.dedup_by(|a, b| (a.t - b.t).abs() < 1e-4);
+        Intersections {
+            points: roots,
+            coplanar: false,
+        }
+    }
+}
+pub fn interpolate(nodes: &[[f64; 2]], t: f64) -> [f64; 2] {
+    if nodes.len() == 2 {
+        return std::array::from_fn(|i| nodes[0][i] * (1. - t) + nodes[1][i] * t);
+    }
+    // Interpolating quadratic: the middle handle lies ON the curve at t=0.5.
+    let weights = [
+        2. * (t - 0.5) * (t - 1.),
+        4. * t * (1. - t),
+        2. * t * (t - 0.5),
+    ];
+    std::array::from_fn(|i| (0..3).map(|j| nodes[j][i] * weights[j]).sum())
+}
+pub fn connected(a: Oklch, b: Oklch) -> bool {
+    a.finite()
+        && b.finite()
+        && (a.l - b.l).abs() < 0.1
+        && (a.c - b.c).abs() < 0.05
+        && (normalized(a.h, 2) - normalized(b.h, 2)).abs() < 30. / 360.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn spline_goes_through_all_nodes() {
+        let n = [[0., 0.], [0.5, 0.15], [1., 0.]];
+        assert_eq!(interpolate(&n, 0.5), n[1]);
+        assert_eq!(interpolate(&n, 0.), n[0]);
+        assert_eq!(interpolate(&n, 1.), n[2]);
+    }
+    #[test]
+    fn presets_and_spline_axis_lock() {
+        for i in 0..4 {
+            assert!(Project::preset(i).compile().is_ok());
+        }
+        let mut p = Project::default();
+        p.expressions[0] = "invalid".into();
+        assert!(p.compile().is_ok());
+        p.expressions[2] = "invalid".into();
+        assert!(p.compile().is_err());
+    }
+    #[test]
+    fn intersections_and_jumps() {
+        let c = Project::preset(2).compile().unwrap();
+        assert_eq!(c.intersections(Plane::Cl, 100.).points.len(), 0);
+        assert_eq!(c.intersections(Plane::Ch, 0.8).points.len(), 2);
+        assert_eq!(c.intersections(Plane::Lh, 0.1).points.len(), 2);
+        let mono = Project::default().compile().unwrap();
+        assert!(mono.intersections(Plane::Cl, 136.59).coplanar);
+    }
+    #[test]
+    fn custom_param_and_nonfinite_rejection() {
+        let mut p = Project::preset(2);
+        p.parameter = "v".into();
+        p.expressions = p.expressions.map(|e| e.replace('t', "v"));
+        assert!(p.compile().is_ok());
+        p.expressions[0] = "sqrt(-1)".into();
+        assert!(p.compile().is_err());
+    }
+    #[test]
+    fn tangencies_and_constant_intervals() {
+        let mut p = Project::preset(1);
+        p.expressions[0] = "0.5 + (t-0.3333)^2".into();
+        let roots = p.compile().unwrap().intersections(Plane::Ch, 0.5).points;
+        assert_eq!(roots.len(), 1);
+        assert!((roots[0].t - 0.3333).abs() < 1e-5);
+        let c = Project::preset(2).compile().unwrap();
+        assert_eq!(c.intersections(Plane::Cl, 15.).points.len(), 2);
+    }
+    #[test]
+    fn saved_project_reproduces_curve_and_view() {
+        let mut p = Project::preset(3);
+        p.cursor = 0.37;
+        p.slices = [0.42, 0.13, 220.];
+        p.yaw = 1.2;
+        let encoded = serde_json::to_string(&p).unwrap();
+        let restored: Project = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            p.compile()
+                .unwrap()
+                .sample(37)
+                .iter()
+                .map(|s| s.color)
+                .collect::<Vec<_>>(),
+            restored
+                .compile()
+                .unwrap()
+                .sample(37)
+                .iter()
+                .map(|s| s.color)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(p.slices, restored.slices);
+        assert_eq!(p.cursor, restored.cursor);
+        assert_eq!(p.yaw, restored.yaw);
+        let mut invalid = restored;
+        invalid.sample_count = usize::MAX;
+        assert!(invalid.compile().is_err());
+    }
+    #[test]
+    fn imported_hue_uses_the_short_arc_and_projection_keeps_360_endpoint() {
+        let p = Project {
+            mode: Mode::Imported,
+            imported: vec![Oklch::new(0.5, 0.1, 350.), Oklch::new(0.7, 0.2, 10.)],
+            ..Default::default()
+        };
+        let c = p.compile().unwrap();
+        let middle = c.at(0.5);
+        assert!((middle.h - 360.).abs() < 1e-10);
+        assert!((middle.l - 0.6).abs() < 1e-10);
+        assert_eq!(Plane::Ch.project(middle)[0], 1.);
+        assert!(connected(c.at(0.49), middle));
+        assert!(!connected(middle, c.at(0.51)));
+        assert!(
+            c.intersections(Plane::Cl, 0.)
+                .points
+                .iter()
+                .any(|s| (s.t - 0.5).abs() < 1e-6)
+        );
+    }
+}
