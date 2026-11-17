@@ -1,6 +1,7 @@
 use crate::{
     color::Oklch,
     expr::{self, Expr},
+    spline::Spline,
 };
 use serde::{Deserialize, Serialize};
 
@@ -82,7 +83,11 @@ pub struct Project {
     pub constants: String,
     pub expressions: [String; 3],
     pub mode: Mode,
+    /// Legacy quadratic anchors, retained only for reading older projects.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nodes: Vec<[f64; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spline: Option<Spline>,
     pub imported: Vec<Oklch>,
     pub slices: [f64; 3],
     pub cursor: f64,
@@ -141,13 +146,14 @@ impl Project {
                 vec![[0., 0.], [0.5, 0.15], [1., 0.]],
             ),
         };
-        Self {
+        let mut project = Self {
             name: name.into(),
             parameter: "t".into(),
             constants: constants.into(),
             expressions: expressions.map(str::to_string),
             mode,
             nodes,
+            spline: None,
             imported: vec![],
             slices: [0.65, 0.10, 136.59],
             cursor: 0.5,
@@ -156,7 +162,35 @@ impl Project {
             yaw: -0.65,
             pitch: 0.65,
             zoom: 1.,
+        };
+        project.migrate_spline().expect("valid preset spline");
+        project
+    }
+    pub fn resolved_spline(&self) -> Result<Option<Spline>, String> {
+        if let Some(spline) = &self.spline {
+            spline.validate()?;
+            return Ok(Some(spline.clone()));
         }
+        let Mode::Spline(plane) = self.mode else {
+            return Ok(None);
+        };
+        if !(2..=3).contains(&self.nodes.len())
+            || self.nodes.iter().flatten().any(|v| !v.is_finite())
+        {
+            return Err("A spline needs two or three finite nodes".into());
+        }
+        let (x, y, _) = plane.axes();
+        let points: Vec<_> = self
+            .nodes
+            .iter()
+            .map(|p| [p[0] / denormalized(1., x), p[1] / denormalized(1., y)])
+            .collect();
+        Ok(Some(Spline::from_legacy(&points)))
+    }
+    pub fn migrate_spline(&mut self) -> Result<(), String> {
+        self.spline = self.resolved_spline()?;
+        self.nodes.clear();
+        Ok(())
     }
     pub fn compile(&self) -> Result<Curve, String> {
         if !self.cursor.is_finite()
@@ -197,12 +231,7 @@ impl Project {
                 Expr::Number(0.)
             });
         }
-        if matches!(self.mode, Mode::Spline(_))
-            && (!(2..=3).contains(&self.nodes.len())
-                || self.nodes.iter().flatten().any(|x| !x.is_finite()))
-        {
-            return Err("A spline needs two or three finite nodes".into());
-        }
+        let spline = self.resolved_spline()?;
         if matches!(self.mode, Mode::Imported)
             && (self.imported.len() < 2 || self.imported.iter().any(|p| !p.finite()))
         {
@@ -211,7 +240,7 @@ impl Project {
         let curve = Curve {
             channels: channels.try_into().unwrap(),
             mode: self.mode.clone(),
-            nodes: self.nodes.clone(),
+            spline,
             imported: self.imported.clone(),
         };
         for i in 0..CURVE_SAMPLES {
@@ -229,14 +258,19 @@ impl Project {
         if self.mode == Mode::Spline(plane) {
             return;
         }
-        self.nodes = [0., 0.5, 1.]
+        let points: Vec<_> = [0., 0.5, 1.]
             .into_iter()
             .map(|t| {
                 let p = curve.at(t);
                 let (x, y, _) = plane.axes();
-                [p.channel(x), p.channel(y)]
+                [
+                    p.channel(x) / denormalized(1., x),
+                    p.channel(y) / denormalized(1., y),
+                ]
             })
             .collect();
+        self.spline = Some(Spline::from_legacy(&points));
+        self.nodes.clear();
         self.mode = Mode::Spline(plane);
     }
 }
@@ -244,7 +278,7 @@ impl Project {
 pub struct Curve {
     channels: [Expr; 3],
     pub mode: Mode,
-    pub nodes: Vec<[f64; 2]>,
+    pub spline: Option<Spline>,
     imported: Vec<Oklch>,
 }
 #[derive(Clone, Copy, Debug)]
@@ -275,7 +309,7 @@ impl Curve {
             self.channels[2].eval(t),
         );
         if let Mode::Spline(plane) = self.mode {
-            let p = interpolate(&self.nodes, t);
+            let p = plane.from_point(self.spline.as_ref().unwrap().at(t));
             let (x, y, _) = plane.axes();
             c.set_channel(x, p[0]);
             c.set_channel(y, p[1]);
@@ -491,6 +525,53 @@ mod tests {
         let mut invalid = restored;
         invalid.sample_count = usize::MAX;
         assert!(invalid.compile().is_err());
+    }
+    #[test]
+    fn old_project_files_migrate_exactly_in_all_planes_including_unwrapped_hue() {
+        for plane in Plane::ALL {
+            for count in [2, 3] {
+                let (x, y, _) = plane.axes();
+                let normalized = [[-0.1, 0.1], [0.4, 0.8], [1.2, 0.2]];
+                let raw: Vec<_> = normalized
+                    .iter()
+                    .take(count)
+                    .map(|p| plane.from_point(*p))
+                    .collect();
+                let p = Project {mode: Mode::Spline(plane), spline: None, nodes: raw.clone(), ..Default::default()};
+                // No new spline field is present in the old JSON format.
+                let encoded = serde_json::to_string(&p).unwrap();
+                assert!(!encoded.contains("\"spline\""));
+                let mut restored: Project = serde_json::from_str(&encoded).unwrap();
+                restored.migrate_spline().unwrap();
+                assert!(restored.nodes.is_empty());
+                let curve = restored.compile().unwrap();
+                for i in 0..=100 {
+                    let t = i as f64 / 100.;
+                    let old = interpolate(&raw, t);
+                    let new = curve.at(t);
+                    assert!((new.channel(x) - old[0]).abs() < 1e-9);
+                    assert!((new.channel(y) - old[1]).abs() < 1e-9);
+                }
+            }
+        }
+    }
+    #[test]
+    fn cubic_project_roundtrip_keeps_constraints_and_all_channels() {
+        use crate::spline::{NodeMode, Side};
+        let mut p = Project::default();
+        let s = p.spline.as_mut().unwrap();
+        s.set_symmetry(true);
+        s.drag_handle(0, Side::Outgoing, [0.2, 0.4]);
+        s.set_middle_mode(NodeMode::Auto);
+        let encoded = serde_json::to_string(&p).unwrap();
+        assert!(!encoded.contains("\"nodes\":[["));
+        let restored: Project = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(p.spline, restored.spline);
+        let a = p.compile().unwrap();
+        let b = restored.compile().unwrap();
+        for i in 0..=100 {
+            assert_eq!(a.at(i as f64 / 100.), b.at(i as f64 / 100.));
+        }
     }
     #[test]
     fn imported_hue_uses_the_short_arc_and_projection_keeps_360_endpoint() {

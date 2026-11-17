@@ -12,6 +12,7 @@ use okclrmp::{
     exchange::{self, ExportSpace, ImportSpace},
     gpu::{self, Gpu},
     model::{self, CURVE_SAMPLES, Curve, Mode, Plane, Project, Sample},
+    spline::{self, Drag, NodeMode, Side, Spline},
 };
 use std::sync::Arc;
 
@@ -147,10 +148,11 @@ impl StudioModel {
     }
     fn set_project(
         &mut self,
-        p: Project,
+        mut p: Project,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        p.migrate_spline()?;
         let curve = p.compile()?;
         self.project = p;
         self.curve = curve;
@@ -215,7 +217,8 @@ struct StudioPanel {
     _observer: Subscription,
     bounds: Bounds<Pixels>,
     cache: Option<(Vec<u64>, Arc<RenderImage>)>,
-    drag_node: Option<usize>,
+    spline_drag: Option<Drag>,
+    selected_node: Option<usize>,
     orbit_start: Option<Point<Pixels>>,
     export_space: ExportSpace,
     import_space: ImportSpace,
@@ -230,7 +233,8 @@ impl StudioPanel {
             _observer: observer,
             bounds: Bounds::default(),
             cache: None,
-            drag_node: None,
+            spline_drag: None,
+            selected_node: None,
             orbit_start: None,
             export_space: ExportSpace::Hex,
             import_space: ImportSpace::Hex,
@@ -358,38 +362,25 @@ impl StudioPanel {
                     "Plots show the last valid curve. Export is paused.",
                 ));
         }
-        if let Mode::Spline(plane) = p.mode {
-            content = content.child(
-                row()
-                    .child(caption(format!("{} interpolating spline", plane.short())).flex_1())
-                    .child(
-                        Button::new("line")
-                            .label("2")
-                            .small()
-                            .selected(p.nodes.len() == 2)
-                            .on_click(cx.listener(|this, _, _, cx| this.set_nodes(2, cx))),
-                    )
-                    .child(
-                        Button::new("quadratic")
-                            .label("3")
-                            .small()
-                            .selected(p.nodes.len() == 3)
-                            .on_click(cx.listener(|this, _, _, cx| this.set_nodes(3, cx))),
-                    ),
-            );
-            for (i, n) in p.nodes.iter().enumerate() {
+        if let Mode::Spline(plane) = p.mode
+            && let Some(s) = &p.spline
+        {
+            content = content.child(section("SPLINE NODES"));
+            for (i, n) in s.nodes.iter().enumerate() {
+                let v = plane.from_point(n.position);
                 content = content.child(
                     caption(format!(
-                        "{} = {:.2}     ({:.4}, {:.4})",
+                        "{} · {}={:.3}  ({:.4}, {:.4})",
+                        i + 1,
                         p.parameter,
-                        i as f64 / (p.nodes.len() - 1) as f64,
-                        n[0],
-                        n[1]
+                        s.parameter(i),
+                        v[0],
+                        v[1]
                     ))
                     .font_family("Consolas"),
                 );
             }
-            content=content.child(caption("Drag numbered handles in the active plane. The middle node lies on the quadratic at 0.5."));
+            content = content.child(caption("Edit nodes and handles in the active projection. Smooth keeps independent handle lengths; the middle parameter adjusts to preserve C1."));
         }
         content=content.child(section("INSPECT THE PATH"))
             .child(row().child(caption(format!("{} = {:.3}",p.parameter,p.cursor)).flex_1()).child(div().w_8().h_5().rounded_sm().bg(color_value(current))).child(caption(current.hex(true))))
@@ -406,19 +397,106 @@ impl StudioPanel {
             .child(content)
             .into_any_element()
     }
-    fn set_nodes(&mut self, n: usize, cx: &mut Context<Self>) {
+    fn edit_spline(&mut self, cx: &mut Context<Self>, edit: impl FnOnce(&mut Spline)) {
+        self.spline_drag = None;
         self.model.update(cx, |m, cx| {
-            if let Mode::Spline(plane) = m.project.mode {
-                let (x, y, _) = plane.axes();
-                m.project.nodes = (0..n)
-                    .map(|i| {
-                        let c = m.curve.at(i as f64 / (n - 1) as f64);
-                        [c.channel(x), c.channel(y)]
-                    })
-                    .collect();
+            if matches!(m.project.mode, Mode::Spline(_))
+                && let Some(spline) = &mut m.project.spline
+            {
+                edit(spline);
                 m.rebuild(cx);
             }
         });
+    }
+    fn spline_tools(&self, s: &Spline, cx: &Context<Self>) -> Div {
+        let mut tools = column().gap_1().child(
+            row()
+                .flex_wrap()
+                .gap_1()
+                .child(
+                    Button::new("cubic")
+                        .label("Cubic")
+                        .small()
+                        .selected(!s.linear)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.edit_spline(cx, |s| s.set_linear(false))
+                        })),
+                )
+                .child(
+                    Button::new("linear")
+                        .label("Line")
+                        .small()
+                        .selected(s.linear)
+                        .tooltip("Straight line · two nodes · no handles")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.edit_spline(cx, |s| s.set_linear(true))
+                        })),
+                )
+                .child(
+                    Button::new("two-nodes")
+                        .label("2 nodes")
+                        .small()
+                        .selected(s.nodes.len() == 2)
+                        .tooltip("Remove the middle node; preserve endpoint tangents")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.edit_spline(cx, |s| s.remove_middle())
+                        })),
+                )
+                .child(
+                    Button::new("three-nodes")
+                        .label("3 nodes")
+                        .small()
+                        .selected(s.nodes.len() == 3)
+                        .tooltip("Split the cubic at its midpoint without changing its shape")
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.edit_spline(cx, |s| s.add_middle())),
+                        ),
+                )
+                .child(
+                    Button::new("symmetry")
+                        .label("Symmetry")
+                        .small()
+                        .selected(s.symmetric)
+                        .tooltip("Mirror nodes and handles about the vertical axis")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.edit_spline(cx, |s| s.set_symmetry(!s.symmetric))
+                        })),
+                ),
+        );
+        if s.nodes.len() == 3 && !s.linear {
+            let mut modes = row().flex_wrap().gap_1().child(caption("Middle"));
+            for (i, mode, tip) in [
+                (
+                    0,
+                    NodeMode::Corner,
+                    "First click: free the tangents. Second click: remove middle handles.",
+                ),
+                (
+                    1,
+                    NodeMode::Smooth,
+                    "Snap to C1; dragging preserves the opposite handle length.",
+                ),
+                (2, NodeMode::Auto, "Solve C2 now; manual edits keep C1."),
+                (
+                    3,
+                    NodeMode::Symmetric,
+                    "Keep C1 and equal lengths; dragging changes both handles.",
+                ),
+            ] {
+                modes = modes.child(
+                    Button::new(("middle-mode", i as usize))
+                        .label(mode.label())
+                        .small()
+                        .selected(s.nodes[1].mode == mode)
+                        .tooltip(tip)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.edit_spline(cx, |s| s.set_middle_mode(mode))
+                        })),
+                );
+            }
+            tools = tools.child(modes);
+        }
+        tools
     }
     fn enable_spline(&mut self, plane: Plane, cx: &mut Context<Self>) {
         self.model.update(cx, |m, cx| {
@@ -822,12 +900,13 @@ impl StudioPanel {
                         this.cache.as_ref().map(|(_, i)| i.clone()),
                         p,
                         m.curve.clone(),
+                        this.selected_node,
                     )
                 })
                 .ok()
             },
             move |bounds, prepared, window, cx| {
-                if let Some((image, p, curve)) = prepared {
+                if let Some((image, p, curve, selected)) = prepared {
                     if let Some(image) = image {
                         let _ = window.paint_image(
                             bounds,
@@ -839,7 +918,7 @@ impl StudioPanel {
                         );
                     }
                     window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                        paint_plot(bounds, plane, &p, &curve, window, cx)
+                        paint_plot(bounds, plane, &p, &curve, selected, window, cx)
                     });
                 }
             },
@@ -866,6 +945,11 @@ impl StudioPanel {
                 )
             };
             bottom = bottom
+                .when(p.mode == Mode::Spline(plane), |el| {
+                    el.child(caption(
+                        "Drag circles = nodes · squares = handles · Ctrl = axis / direction snap",
+                    ))
+                })
                 .child(
                     Slider::new(&m.sliders[a])
                         .accessibility_label(format!("{} slice", model::axis_name(a))),
@@ -880,13 +964,20 @@ impl StudioPanel {
                     "Surface color = maximum chroma at each lightness and hue",
                 ));
         }
-        column()
+        let mut content = column()
             .size_full()
             .min_h_0()
             .p_2()
             .gap_1()
             .bg(rgb(SURFACE))
-            .child(header)
+            .child(header);
+        if let Some(plane) = plane
+            && p.mode == Mode::Spline(plane)
+            && let Some(spline) = &p.spline
+        {
+            content = content.child(self.spline_tools(spline, cx));
+        }
+        content
             .child(
                 div()
                     .id("plot-canvas")
@@ -907,20 +998,20 @@ impl StudioPanel {
                     )
                     .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                         if event.pressed_button == Some(MouseButton::Left) {
-                            this.mouse_move(event.position, cx);
+                            this.mouse_move(event.position, event.modifiers.control, cx);
                         }
                     }))
                     .on_mouse_up(
                         MouseButton::Left,
                         cx.listener(|this, _, _, _| {
-                            this.drag_node = None;
+                            this.spline_drag = None;
                             this.orbit_start = None;
                         }),
                     )
                     .on_mouse_up_out(
                         MouseButton::Left,
                         cx.listener(|this, _, _, _| {
-                            this.drag_node = None;
+                            this.spline_drag = None;
                             this.orbit_start = None;
                         }),
                     )
@@ -958,16 +1049,16 @@ impl StudioPanel {
         let plane = plane.unwrap();
         let p = self.local(pos);
         let m = self.model.read(cx);
-        if m.project.mode == Mode::Spline(plane) {
-            let (x, y, _) = plane.axes();
+        if m.project.mode == Mode::Spline(plane)
+            && let Some(spline) = &m.project.spline
+        {
             let w = f32::from(self.bounds.size.width) as f64;
             let h = f32::from(self.bounds.size.height) as f64;
-            self.drag_node = m.project.nodes.iter().position(|n| {
-                ((model::normalized(n[0], x) - p[0]) * w)
-                    .hypot((model::normalized(n[1], y) - p[1]) * h)
-                    < 14.
-            });
-            if self.drag_node.is_some() {
+            if let Some(target) = spline::hit_test(spline, p, [w, h]) {
+                self.selected_node = Some(target.node());
+                self.spline_drag = Some(Drag::new(spline.clone(), target, p));
+                window.focus(&self.focus, cx);
+                cx.notify();
                 return;
             }
         }
@@ -989,7 +1080,7 @@ impl StudioPanel {
             cx.notify();
         });
     }
-    fn mouse_move(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+    fn mouse_move(&mut self, pos: Point<Pixels>, ctrl: bool, cx: &mut Context<Self>) {
         if let Some(last) = self.orbit_start {
             let d = pos - last;
             self.orbit_start = Some(pos);
@@ -999,11 +1090,19 @@ impl StudioPanel {
                 cx.notify();
             });
         }
-        if let (Some(i), Kind::Plot(Some(plane))) = (self.drag_node, self.kind) {
-            let p = self.local(pos).map(|v| v.clamp(0., 1.));
-            let n = plane.from_point(p);
+        let p = self.local(pos);
+        let metric = [
+            f32::from(self.bounds.size.width) as f64,
+            f32::from(self.bounds.size.height) as f64,
+        ];
+        if let (Some(drag), Kind::Plot(Some(plane))) = (&mut self.spline_drag, self.kind) {
+            if self.model.read(cx).project.mode != Mode::Spline(plane) {
+                self.spline_drag = None;
+                return;
+            }
+            let spline = drag.update(p, ctrl, metric);
             self.model.update(cx, |m, cx| {
-                m.project.nodes[i] = n;
+                m.project.spline = Some(spline);
                 m.rebuild(cx);
             });
         }
@@ -1098,6 +1197,7 @@ fn paint_plot(
     plane: Option<Plane>,
     p: &Project,
     curve: &Curve,
+    selected: Option<usize>,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -1286,28 +1386,77 @@ fn paint_plot(
     }
     if let Some(plane) = plane
         && p.mode == Mode::Spline(plane)
+        && let Some(spline) = &p.spline
     {
-        let (x, y, _) = plane.axes();
-        for (i, node) in p.nodes.iter().enumerate() {
-            let mut c = Oklch::default();
-            c.set_channel(x, node[0]);
-            c.set_channel(y, node[1]);
-            if let Some(pos) = project(c) {
-                circle(
-                    pos,
-                    7.,
-                    rgb(0x0f171d).into(),
-                    Some((2., rgb(ACCENT).into())),
+        let screen = |q: [f64; 2]| {
+            point(
+                bounds.left() + bounds.size.width * q[0] as f32,
+                bounds.bottom() - bounds.size.height * q[1] as f32,
+            )
+        };
+        if spline.symmetric {
+            let x = spline.axis();
+            let height = f32::from(bounds.size.height);
+            for i in 0..(height / 10.).ceil() as usize {
+                let t = i as f64 * 10. / height as f64;
+                line(
+                    screen([x, t]),
+                    screen([x, (t + 5. / height as f64).min(1.)]),
+                    1.,
+                    0x77998b,
                     window,
-                );
-                label(
-                    (i + 1).to_string(),
-                    point(pos.x + px(10.), pos.y - px(8.)),
-                    ACCENT,
-                    window,
-                    cx,
                 );
             }
+        }
+        if !spline.linear {
+            for (i, node) in spline.nodes.iter().enumerate() {
+                for side in [Side::Incoming, Side::Outgoing] {
+                    if (i == 0 && side == Side::Incoming)
+                        || (i == spline.nodes.len() - 1 && side == Side::Outgoing)
+                    {
+                        continue;
+                    }
+                    if let Some(handle) = node.handle_position(side) {
+                        let pos = screen(handle);
+                        line(screen(node.position), pos, 1.2, ACCENT, window);
+                        let mut square = fill(
+                            Bounds::new(
+                                point(pos.x - px(4.), pos.y - px(4.)),
+                                size(px(8.), px(8.)),
+                            ),
+                            rgb(ACCENT),
+                        );
+                        square.border_widths = Edges::all(px(1.));
+                        square.border_color = rgb(0x102018).into();
+                        window.paint_quad(square);
+                    }
+                }
+            }
+        }
+        for (i, node) in spline.nodes.iter().enumerate() {
+            let pos = screen(node.position);
+            circle(
+                pos,
+                7.,
+                rgb(if selected == Some(i) {
+                    ACCENT
+                } else {
+                    0x0f171d
+                })
+                .into(),
+                Some((2., rgb(ACCENT).into())),
+                window,
+            );
+            // Keep endpoint labels inside the viewport.
+            let dx = if node.position[0] > 0.94 { -20. } else { 10. };
+            let dy = if node.position[1] > 0.94 { 8. } else { -20. };
+            label(
+                (i + 1).to_string(),
+                point(pos.x + px(dx), pos.y + px(dy)),
+                ACCENT,
+                window,
+                cx,
+            );
         }
     }
     for (i, slice) in Plane::ALL.into_iter().enumerate() {
