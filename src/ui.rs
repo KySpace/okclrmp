@@ -971,6 +971,52 @@ impl StudioPanel {
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle_spline(plane, cx))),
                 );
         } else {
+            let controls = row().gap_0().flex_shrink_0()
+                .child(
+                    tool_button("polar-view", include_bytes!("icons/polar-view.svg"), "Polar gamut",
+                        if p.polar { "Polar coordinates: C radius, H azimuth, L up. Click for rectangular coordinates" }
+                        else { "Rectangular coordinates: H-L floor, C height. Click for polar coordinates" })
+                        .selected(p.polar)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.model.update(cx, |m, cx| {
+                                m.project.set_polar(!m.project.polar);
+                                cx.notify();
+                            })
+                        })),
+                )
+                .child(
+                    tool_button("slice-contours", include_bytes!("icons/slice-contours.svg"), "Slice contours",
+                        "Toggle surface slice contours: L in blue, C in gold, H in purple")
+                        .selected(p.show_slice_contours)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.model.update(cx, |m, cx| {
+                                m.project.show_slice_contours = !m.project.show_slice_contours;
+                                cx.notify();
+                            })
+                        })),
+                )
+                .child(
+                    tool_button("orthographic", include_bytes!("icons/orthographic.svg"), "Orthographic projection",
+                        if p.orthographic { "Orthographic projection with parallel rays. Click for perspective" }
+                        else { "Perspective projection. Click for orthographic projection with parallel rays" })
+                        .selected(p.orthographic)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.model.update(cx, |m, cx| {
+                                m.project.orthographic = !m.project.orthographic;
+                                cx.notify();
+                            })
+                        })),
+                )
+                .child(
+                    tool_button("reset-camera", include_bytes!("icons/reset-view.svg"), "Reset view",
+                        "Reset camera orientation, zoom, and hue origin")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.model.update(cx, |m, cx| {
+                                m.project.reset_view();
+                                cx.notify();
+                            })
+                        })),
+                );
             header = header
                 .child(
                     caption(
@@ -985,33 +1031,7 @@ impl StudioPanel {
                     .min_w_0()
                     .truncate(),
                 )
-                .child(
-                    Button::new("polar-view")
-                        .label("Polar")
-                        .small()
-                        .selected(p.polar)
-                        .tooltip("Lightness up · chroma radius · hue azimuth")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.model.update(cx, |m, cx| {
-                                m.project.polar = !m.project.polar;
-                                cx.notify();
-                            })
-                        })),
-                )
-                .child(
-                    Button::new("reset-camera")
-                        .label("Reset view")
-                        .small()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.model.update(cx, |m, cx| {
-                                m.project.yaw = -0.65;
-                                m.project.pitch = 0.65;
-                                m.project.zoom = 1.;
-                                m.project.hue_origin = 0.;
-                                cx.notify();
-                            })
-                        })),
-                );
+                .child(controls);
         }
         let weak = cx.weak_entity();
         let canvas = canvas(
@@ -1042,7 +1062,12 @@ impl StudioPanel {
                             p.zoom.to_bits() as u64,
                             p.hue_origin.to_bits(),
                             p.polar as u64,
+                            p.orthographic as u64,
+                            p.show_slice_contours as u64,
                         ]);
+                        if p.show_slice_contours {
+                            key.extend(p.slices.map(f64::to_bits));
+                        }
                     }
                     if this.cache.as_ref().is_none_or(|(k, _)| *k != key) {
                         match m.gpu.render_themed(plane, &p, w, h, appearance) {
@@ -1306,8 +1331,7 @@ impl StudioPanel {
             let d = pos - last;
             self.orbit_start = Some(pos);
             self.model.update(cx, |m, cx| {
-                m.project.yaw -= f32::from(d.x) * 0.008;
-                m.project.pitch = (m.project.pitch + f32::from(d.y) * 0.008).clamp(0.12, 1.45);
+                m.project.orbit(f32::from(d.x), f32::from(d.y));
                 cx.notify();
             });
         }
@@ -1388,7 +1412,7 @@ impl StudioPanel {
         let p = &self.model.read(cx).project;
         let Some(plane) = plane else {
             return format!(
-                "Left-drag to orbit. Middle-drag horizontally to move the hue origin. Scroll to zoom.\n{}\nCoral dashes mark the path outside sRGB.",
+                "Left-drag to orbit. Zenith ranges from 0° straight above through 90° horizontal to 180° straight below. Use the projection toggle for parallel orthographic rays. Middle-drag horizontally to move the hue origin. Scroll to zoom.\n{}\nSlice contours show L in blue, C in gold, H in purple. Adjust them with the projection sliders.\nCoral dashes mark the path outside sRGB.",
                 if p.polar {
                     "Chroma is radius, hue is azimuth. The vertical C=0 axis runs from black to white."
                 } else {
@@ -1659,13 +1683,15 @@ fn paint_plot(
                 window,
                 cx,
             );
-            label(
-                "L=0".into(),
-                point(a.x + px(7.), a.y),
-                colors.muted,
-                window,
-                cx,
-            );
+            if f32::from(a.x - b.x).hypot(f32::from(a.y - b.y)) > 24. {
+                label(
+                    "L=0".into(),
+                    point(a.x + px(7.), a.y),
+                    colors.muted,
+                    window,
+                    cx,
+                );
+            }
         }
         for i in 0..96 {
             let h = i as f64 * 360. / 96.;

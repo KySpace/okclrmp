@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 
 pub const C_MAX: f64 = 0.4;
 pub const CURVE_SAMPLES: usize = 1025;
+// Pitch is elevation above the horizon; zenith = π/2 - pitch.
+pub const MIN_PITCH: f32 = -std::f32::consts::FRAC_PI_2;
+pub const MAX_PITCH: f32 = std::f32::consts::FRAC_PI_2;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Plane {
     Cl,
@@ -129,6 +132,10 @@ pub struct Project {
     pub hue_origin: f64,
     #[serde(default)]
     pub polar: bool,
+    #[serde(default)]
+    pub show_slice_contours: bool,
+    #[serde(default)]
+    pub orthographic: bool,
 }
 impl Default for Project {
     fn default() -> Self {
@@ -198,6 +205,8 @@ impl Project {
             zoom: 1.,
             hue_origin: 0.,
             polar: false,
+            show_slice_contours: false,
+            orthographic: false,
         };
         project.migrate_spline().expect("valid preset spline");
         project
@@ -243,7 +252,7 @@ impl Project {
             || !(0. ..=C_MAX).contains(&self.slices[1])
             || !(0. ..=360.).contains(&self.slices[2])
             || !(0.5..=2.5).contains(&self.zoom)
-            || !(0.12..=1.45).contains(&self.pitch)
+            || !(MIN_PITCH..=MAX_PITCH).contains(&self.pitch)
         {
             return Err("Project view settings are outside the supported ranges".into());
         }
@@ -330,6 +339,20 @@ impl Project {
     pub fn use_expressions(&mut self) {
         self.mode = Mode::Expressions;
         self.spline_constant = false;
+    }
+    pub fn set_polar(&mut self, polar: bool) {
+        self.polar = polar;
+        self.pitch = self.pitch.clamp(MIN_PITCH, MAX_PITCH);
+    }
+    pub fn orbit(&mut self, dx: f32, dy: f32) {
+        self.yaw -= dx * 0.008;
+        self.pitch = (self.pitch + dy * 0.008).clamp(MIN_PITCH, MAX_PITCH);
+    }
+    pub fn reset_view(&mut self) {
+        self.yaw = -0.65;
+        self.pitch = 0.65;
+        self.zoom = 1.;
+        self.hue_origin = 0.;
     }
     pub fn pan_hue(&mut self, horizontal_fraction: f64) {
         self.hue_origin = (self.hue_origin - horizontal_fraction * 360.).rem_euclid(360.);
@@ -537,6 +560,47 @@ mod tests {
         assert!(p.compile().is_ok());
         p.expressions[2] = "invalid".into();
         assert!(p.compile().is_err());
+    }
+    #[test]
+    fn orbit_stops_at_both_poles_and_projection_options_roundtrip() {
+        let mut p = Project {
+            orthographic: true,
+            ..Default::default()
+        };
+        p.set_polar(true);
+        for _ in 0..3 {
+            p.orbit(15., 1000.);
+            assert_eq!(p.pitch, MAX_PITCH);
+        }
+        assert!(p.compile().is_ok());
+        p.show_slice_contours = true;
+        let json = serde_json::to_string(&p).unwrap();
+        let mut restored: Project = serde_json::from_str(&json).unwrap();
+        assert!(restored.polar && restored.show_slice_contours && restored.orthographic);
+        assert_eq!(restored.pitch, MAX_PITCH);
+        assert!(restored.compile().is_ok());
+        restored.orbit(0., -1.);
+        assert!(restored.pitch < MAX_PITCH);
+        restored.orbit(0., 1000.);
+        restored.set_polar(false);
+        assert_eq!(restored.pitch, MAX_PITCH);
+        assert!(restored.compile().is_ok());
+        restored.orbit(0., -1000.);
+        assert_eq!(restored.pitch, MIN_PITCH);
+        let mut old = serde_json::to_value(&p).unwrap();
+        old.as_object_mut().unwrap().remove("show_slice_contours");
+        old.as_object_mut().unwrap().remove("orthographic");
+        let old: Project = serde_json::from_value(old).unwrap();
+        assert!(!old.show_slice_contours && !old.orthographic);
+        restored.reset_view();
+        assert_eq!(restored.pitch, 0.65);
+        assert_eq!(restored.zoom, 1.);
+        assert!(restored.orthographic && restored.show_slice_contours && !restored.polar);
+        let mut invalid = p;
+        invalid.pitch = MAX_PITCH + 0.01;
+        assert!(invalid.compile().is_err());
+        invalid.pitch = MIN_PITCH - 0.01;
+        assert!(invalid.compile().is_err());
     }
     #[test]
     fn constant_slider_changes_the_orthogonal_channel_only_in_all_planes() {

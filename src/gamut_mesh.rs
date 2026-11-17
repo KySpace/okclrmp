@@ -255,6 +255,27 @@ impl Mesh {
         for triangle in self.indices.as_chunks::<3>().0 {
             chart.triangle(*triangle);
         }
+        // The rectangular chart has a neutral C=0 base. It is exposed when
+        // orbiting below the volume; polar C=0 is an axis and needs no base.
+        // Subdivide L for the L^3 gray ramp and H so chart-edge vertices do
+        // not classify the whole floor as a coplanar hue cap in the shader.
+        for l in 0..64 {
+            for h in 0..12 {
+                let point = |i: usize, j: usize| {
+                    let lightness = i as f32 / 64.;
+                    Vertex {
+                        position: [j as f32 / 12. * 1.8 - 0.9, -0.3, lightness * 1.3 - 0.65],
+                        color: [lightness.powi(3); 3],
+                    }
+                };
+                chart.polygon(&[
+                    point(l, h),
+                    point(l, h + 1),
+                    point(l + 1, h + 1),
+                    point(l + 1, h),
+                ]);
+            }
+        }
         chart
     }
 }
@@ -340,5 +361,26 @@ mod tests {
             }
             assert!(chart.vertices.len() > source.vertices.len()); // clipped seam + closure
         }
+    }
+    #[test]
+    fn rectangular_chart_has_a_complete_neutral_chroma_zero_base() {
+        let mesh = source().chart(57.);
+        let mut area = 0.;
+        for triangle in mesh.indices.as_chunks::<3>().0 {
+            let v = triangle.map(|i| mesh.vertices[i as usize]);
+            if !v.iter().all(|p| (p.position[1] + 0.3).abs() < 1e-7) {
+                continue;
+            }
+            for p in v {
+                let l = (p.position[2] + 0.65) / 1.3;
+                assert!(p.color.iter().all(|c| (*c - l.powi(3)).abs() < 1e-6));
+            }
+            let (a, b, c) = (v[0].position, v[1].position, v[2].position);
+            area += ((b[0] - a[0]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[0] - a[0])).abs() * 0.5;
+        }
+        assert!(
+            (area - 1.8 * 1.3).abs() < 0.0001,
+            "C=0 base area was {area}"
+        );
     }
 }

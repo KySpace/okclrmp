@@ -4,7 +4,7 @@ use crate::{
     appearance::Appearance,
     color::Oklch,
     gamut_mesh::{Mesh, Vertex},
-    model::{Plane, Project},
+    model::{self, Plane, Project},
 };
 use anyhow::{Context, Result};
 use glam::{Mat4, Vec3};
@@ -66,26 +66,55 @@ pub fn world(c: Oklch, p: &Project) -> Vec3 {
     }
 }
 pub fn camera(p: &Project, aspect: f32) -> Mat4 {
-    let distance = 3.0 / p.zoom.clamp(0.5, 2.5);
-    let eye = Vec3::new(
-        distance * p.yaw.sin() * p.pitch.cos(),
-        distance * p.pitch.sin(),
-        distance * p.yaw.cos() * p.pitch.cos(),
+    let scale_distance = 3.0 / p.zoom.clamp(0.5, 2.5);
+    let distance = if p.orthographic { 3.0 } else { scale_distance };
+    let target = if p.polar {
+        Vec3::ZERO
+    } else {
+        Vec3::new(0., 0.15, 0.)
+    };
+    let pitch = p.pitch.clamp(model::MIN_PITCH, model::MAX_PITCH);
+    let (sin_pitch, cos_pitch) = if pitch == model::MAX_PITCH {
+        (1., 0.)
+    } else if pitch == model::MIN_PITCH {
+        (-1., 0.)
+    } else {
+        pitch.sin_cos()
+    };
+    let eye = target
+        + Vec3::new(
+            distance * p.yaw.sin() * cos_pitch,
+            distance * sin_pitch,
+            distance * p.yaw.cos() * cos_pitch,
+        );
+    // The pitch tangent is perpendicular to the viewing direction even at
+    // the pole, where a fixed world-Y up vector would make look_at singular.
+    let up = Vec3::new(
+        -p.yaw.sin() * sin_pitch,
+        cos_pitch,
+        -p.yaw.cos() * sin_pitch,
     );
-    Mat4::perspective_rh(40f32.to_radians(), aspect.max(0.1), 0.05, 50.)
-        * Mat4::look_at_rh(
-            eye,
-            if p.polar {
-                Vec3::ZERO
-            } else {
-                Vec3::new(0., 0.15, 0.)
-            },
-            Vec3::Y,
+    let projection = if p.orthographic {
+        // Match perspective scale at the orbit center; zoom changes the
+        // frustum only, keeping the camera outside the volume.
+        let half_height = scale_distance * 20f32.to_radians().tan();
+        let half_width = half_height * aspect.max(0.1);
+        Mat4::orthographic_rh(
+            -half_width,
+            half_width,
+            -half_height,
+            half_height,
+            0.05,
+            50.,
         )
+    } else {
+        Mat4::perspective_rh(40f32.to_radians(), aspect.max(0.1), 0.05, 50.)
+    };
+    projection * Mat4::look_at_rh(eye, target, up)
 }
 pub fn project3(c: Oklch, p: &Project, aspect: f32) -> Option<[f64; 2]> {
     let v = camera(p, aspect) * world(c, p).extend(1.);
-    if v.w <= 0.01 {
+    if !v.is_finite() || v.w <= 0.01 || v.z < 0. || v.z > v.w {
         return None;
     }
     Some([
@@ -326,6 +355,29 @@ impl Gpu {
                     .map(|v| crate::color::decode(v as f64) as f32),
             );
             matrix.push(0.);
+            matrix.extend([
+                p.slices[0] as f32,
+                p.slices[1] as f32,
+                (p.slices[2].rem_euclid(360.) / 360.) as f32,
+                if p.show_slice_contours { 1. } else { 0. },
+            ]);
+            let colors = appearance.palette();
+            for color in [
+                colors.channels[0],
+                colors.channels[1],
+                colors.channels[2],
+                colors.curve_outline,
+            ] {
+                matrix.extend(
+                    [
+                        ((color >> 16) & 255) as f64 / 255.,
+                        ((color >> 8) & 255) as f64 / 255.,
+                        (color & 255) as f64 / 255.,
+                    ]
+                    .map(|c| crate::color::decode(c) as f32),
+                );
+                matrix.push(0.);
+            }
             let uniform = self
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -475,7 +527,7 @@ fn image_size(width: f32, height: f32, scale: f32, limit: u32) -> [u32; 2] {
 
 #[cfg(test)]
 mod tests {
-    use super::{Gpu, image_size, project3, world};
+    use super::{Gpu, camera, image_size, project3, world};
     use crate::{
         color::{Oklch, decode},
         model::{Plane, Project},
@@ -512,6 +564,306 @@ mod tests {
         let black = project3(Oklch::new(0., 0., 0.), &p, 1.5).unwrap();
         let white = project3(Oklch::new(1., 0., 0.), &p, 1.5).unwrap();
         assert!(white[1] > black[1]);
+    }
+    #[test]
+    fn camera_is_stable_at_both_poles_in_every_view_mode() {
+        for polar in [false, true] {
+            for orthographic in [false, true] {
+                let mut p = Project {
+                    polar,
+                    orthographic,
+                    ..Default::default()
+                };
+                for yaw in [
+                    0.,
+                    0.3,
+                    std::f32::consts::FRAC_PI_2,
+                    std::f32::consts::PI,
+                    4.7,
+                    std::f32::consts::TAU,
+                ] {
+                    p.yaw = yaw;
+                    for limit in [crate::model::MIN_PITCH, crate::model::MAX_PITCH] {
+                        p.pitch = limit - limit.signum() * 0.00001;
+                        let near = camera(&p, 1.5).to_cols_array();
+                        p.pitch = limit;
+                        let pole = camera(&p, 1.5);
+                        assert!(pole.is_finite());
+                        assert!(pole.determinant().abs() > 0.000001);
+                        assert!(
+                            near.iter()
+                                .zip(pole.to_cols_array())
+                                .all(|(a, b)| (*a - b).abs() < 0.0001)
+                        );
+                        let focus = if polar {
+                            glam::Vec3::ZERO
+                        } else {
+                            glam::Vec3::new(0., 0.15, 0.)
+                        };
+                        let center = pole * focus.extend(1.);
+                        assert!(
+                            (center.x / center.w).abs() < 1e-6
+                                && (center.y / center.w).abs() < 1e-6
+                        );
+                        if polar {
+                            for l in [0., 1.] {
+                                let point = project3(Oklch::new(l, 0., 0.), &p, 1.5).unwrap();
+                                assert!(point.into_iter().all(|v| (v - 0.5).abs() < 1e-8));
+                            }
+                        }
+                    }
+                    p.pitch = 0.;
+                    assert!(camera(&p, 1.5).is_finite());
+                }
+            }
+        }
+    }
+    #[test]
+    fn orthographic_projection_has_parallel_rays_and_predictable_zoom() {
+        let mut p = Project {
+            polar: true,
+            yaw: 0.,
+            pitch: 0.,
+            ..Default::default()
+        };
+        let span = |matrix: glam::Mat4, z: f32| {
+            let a = matrix * glam::Vec4::new(-0.1, 0., z, 1.);
+            let b = matrix * glam::Vec4::new(0.1, 0., z, 1.);
+            b.x / b.w - a.x / a.w
+        };
+        let perspective = camera(&p, 1.5);
+        let reference = span(perspective, 0.);
+        assert!(span(perspective, 0.7) > reference);
+        p.orthographic = true;
+        let parallel = camera(&p, 1.5);
+        assert!((span(parallel, 0.) - span(parallel, 0.7)).abs() < 1e-7);
+        assert!((span(parallel, 0.) - reference).abs() < 1e-7);
+        p.zoom = 2.;
+        assert!((span(camera(&p, 1.5), 0.) - 2. * reference).abs() < 1e-7);
+        assert!(project3(Oklch::new(0.5, 2., 90.), &p, 1.5).is_none());
+        assert!(project3(Oklch::new(0.5, 20., 270.), &p, 1.5).is_none());
+    }
+    #[test]
+    #[ignore = "requires a real WGPU adapter; writes .research/projections images"]
+    fn full_zenith_and_orthographic_modes_render_on_gpu() {
+        use crate::appearance::Appearance;
+        let gpu = Gpu::new().unwrap();
+        let (w, h) = (320u32, 240u32);
+        std::fs::create_dir_all(".research/projections").unwrap();
+        for polar in [false, true] {
+            for orthographic in [false, true] {
+                for (name, pitch) in [
+                    ("above", crate::model::MAX_PITCH),
+                    ("side", 0.),
+                    ("below", crate::model::MIN_PITCH),
+                ] {
+                    let mut p = Project {
+                        polar,
+                        orthographic,
+                        pitch,
+                        slices: [0.61, 0.12, 185.],
+                        hue_origin: 57.,
+                        ..Default::default()
+                    };
+                    assert!(p.compile().is_ok());
+                    let off = gpu
+                        .render_themed(None, &p, w, h, Appearance::Light)
+                        .unwrap();
+                    let colored = off
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .filter(|c| c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2]) > 35)
+                        .count();
+                    if !polar && name == "below" {
+                        assert!(
+                            colored < 10,
+                            "The rectangular C=0 base must be neutral: {colored}"
+                        );
+                    } else {
+                        assert!(
+                            colored > 500,
+                            "The gamut surface is missing: polar={polar}, orthographic={orthographic}, {name}"
+                        );
+                    }
+                    p.show_slice_contours = true;
+                    let on = gpu
+                        .render_themed(None, &p, w, h, Appearance::Light)
+                        .unwrap();
+                    assert!(on.as_chunks::<4>().0.iter().all(|c| c[3] == 255));
+                    assert_ne!(off, on);
+                    let label = format!(
+                        "{}-{}-{name}",
+                        if polar { "polar" } else { "rectangular" },
+                        if orthographic {
+                            "orthographic"
+                        } else {
+                            "perspective"
+                        }
+                    );
+                    image::save_buffer(
+                        format!(".research/projections/{label}.png"),
+                        &on,
+                        w,
+                        h,
+                        image::ColorType::Rgba8,
+                    )
+                    .unwrap();
+                    println!("{label}: rendered successfully");
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a real WGPU adapter; writes .research/surface-contours images"]
+    fn gamut_slice_contours_and_top_down_polar_render_on_gpu() {
+        use crate::appearance::Appearance;
+        let gpu = Gpu::new().unwrap();
+        let (w, h) = (512u32, 384u32);
+        std::fs::create_dir_all(".research/surface-contours").unwrap();
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            for (name, polar, pitch) in [
+                ("rectangular", false, 0.65),
+                ("polar", true, 0.65),
+                ("top", true, crate::model::MAX_PITCH),
+            ] {
+                let mut p = Project {
+                    polar,
+                    pitch,
+                    hue_origin: 57.,
+                    slices: [0.61, 0.12, 185.],
+                    ..Default::default()
+                };
+                let curve = p.compile().unwrap();
+                let off = gpu.render_themed(None, &p, w, h, appearance).unwrap();
+                p.show_slice_contours = true;
+                let on = gpu.render_themed(None, &p, w, h, appearance).unwrap();
+                for (kind, pixels) in [("off", &off), ("on", &on)] {
+                    image::save_buffer(
+                        format!(".research/surface-contours/{name}-{appearance:?}-{kind}.png"),
+                        pixels,
+                        w,
+                        h,
+                        image::ColorType::Rgba8,
+                    )
+                    .unwrap();
+                }
+                assert!(on.as_chunks::<4>().0.iter().all(|p| p[3] == 255));
+                let changed = off
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(on.as_chunks::<4>().0)
+                    .filter(|(a, b)| a != b)
+                    .count();
+                assert!(
+                    changed > 150,
+                    "Missing contours in {name}/{appearance:?}: {changed}"
+                );
+                for color in appearance.palette().channels {
+                    let expected = [(color >> 16) & 255, (color >> 8) & 255, color & 255];
+                    let pixels = on
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .zip(off.as_chunks::<4>().0)
+                        .filter(|(a, b)| {
+                            a != b && (0..3).all(|i| (a[i] as i32 - expected[i] as i32).abs() <= 2)
+                        })
+                        .count();
+                    assert!(
+                        pixels > 3,
+                        "Missing contour color {color:06x} in {name}/{appearance:?}: {pixels}"
+                    );
+                }
+                let hue = appearance.palette().channels[2];
+                let hue_rgb = [(hue >> 16) & 255, (hue >> 8) & 255, hue & 255];
+                let hue_pixels = |image: &[u8]| {
+                    image
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .filter(|a| (0..3).all(|i| (a[i] as i32 - hue_rgb[i] as i32).abs() <= 2))
+                        .count()
+                };
+                if name == "polar" {
+                    // H=35 is behind this oblique camera. It must not draw
+                    // the opposite H+180 half-plane on the front surface.
+                    p.slices[2] = 35.;
+                    let back = gpu.render_themed(None, &p, w, h, appearance).unwrap();
+                    assert!(
+                        hue_pixels(&back) < hue_pixels(&on) / 4 + 3,
+                        "A back-side hue contour must stay occluded"
+                    );
+                    p.slices[2] = 185.;
+                } else if name == "rectangular" {
+                    p.slices[2] = p.hue_origin;
+                    let seam = gpu.render_themed(None, &p, w, h, appearance).unwrap();
+                    assert!(
+                        hue_pixels(&seam) < 2000,
+                        "A coplanar hue-chart cap must not be filled as a contour"
+                    );
+                    // The visible cap interior is away from both L/C slices.
+                    // It must remain unchanged, rather than acquire hue speckles.
+                    let mut checked = 0;
+                    for l in [0.25, 0.4, 0.55, 0.75] {
+                        for c in [0.015, 0.03] {
+                            let color = Oklch::new(l, c, p.hue_origin);
+                            if !color.in_gamut() {
+                                continue;
+                            }
+                            let q = project3(color, &p, w as f32 / h as f32).unwrap();
+                            let (x, y) =
+                                ((q[0] * w as f64) as i32, ((1. - q[1]) * h as f64) as i32);
+                            for dy in -1..=1 {
+                                for dx in -1..=1 {
+                                    let (x, y) = (x + dx, y + dy);
+                                    if !(0..w as i32).contains(&x) || !(0..h as i32).contains(&y) {
+                                        continue;
+                                    }
+                                    let i = ((y as u32 * w + x as u32) * 4) as usize;
+                                    assert!(
+                                        (0..3).all(|k| (seam[i + k] as i32 - off[i + k] as i32)
+                                            .abs()
+                                            <= 2),
+                                        "Coplanar cap changed at ({x},{y})"
+                                    );
+                                    checked += 1;
+                                }
+                            }
+                        }
+                    }
+                    assert!(checked > 30);
+                    image::save_buffer(
+                        format!(".research/surface-contours/seam-{appearance:?}.png"),
+                        &seam,
+                        w,
+                        h,
+                        image::ColorType::Rgba8,
+                    )
+                    .unwrap();
+                    p.slices[2] = 185.;
+                }
+                // The surface shader cannot add contours in empty background.
+                assert_eq!(on[..16 * 4], off[..16 * 4]);
+                let after = p.compile().unwrap();
+                for i in 0..=20 {
+                    assert_eq!(after.at(i as f64 / 20.), curve.at(i as f64 / 20.));
+                }
+                let old = on.clone();
+                p.slices[0] = 0.78;
+                let moved = gpu.render_themed(None, &p, w, h, appearance).unwrap();
+                assert_ne!(old, moved);
+                p.slices[2] = 0.;
+                let zero = gpu.render_themed(None, &p, w, h, appearance).unwrap();
+                p.slices[2] = 360.;
+                assert_eq!(zero, gpu.render_themed(None, &p, w, h, appearance).unwrap());
+                println!(
+                    "{name}/{appearance:?}: {changed} contour pixels; all three channel colors present"
+                );
+            }
+        }
     }
 
     #[test]
