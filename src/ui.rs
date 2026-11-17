@@ -135,7 +135,15 @@ impl StudioModel {
                 cx.subscribe(slider, move |this, _, event: &SliderEvent, cx| {
                     if let SliderEvent::Change(value) = event {
                         if i < 3 {
-                            this.project.slices[i] = value.start() as f64;
+                            // Programmatic slider synchronization must not round
+                            // a saved f64 constant to f32 unless the user moves it.
+                            if this.project.slices[i] as f32 == value.start() {
+                                return;
+                            }
+                            if this.project.set_slice(i, value.start() as f64) {
+                                this.rebuild(cx);
+                                return;
+                            }
                         } else {
                             this.project.cursor = value.start() as f64;
                         }
@@ -210,7 +218,11 @@ impl StudioModel {
     }
     fn sync_slices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let c = self.curve.at(self.project.cursor);
-        self.project.slices = [c.l.clamp(0., 1.), c.c.clamp(0., 0.4), c.h.rem_euclid(360.)];
+        let mut slices = [c.l.clamp(0., 1.), c.c.clamp(0., 0.4), c.h.rem_euclid(360.)];
+        if let Some(axis) = self.project.constant_axis() {
+            slices[axis] = self.project.slices[axis];
+        }
+        self.project.slices = slices;
         for i in 0..3 {
             self.sliders[i].update(cx, |s, cx| {
                 s.set_value(self.project.slices[i] as f32, window, cx)
@@ -326,7 +338,7 @@ impl StudioPanel {
                             .selected(expressions)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.model.update(cx, |m, cx| {
-                                    m.project.mode = Mode::Expressions;
+                                    m.project.use_expressions();
                                     m.rebuild(cx);
                                 })
                             })),
@@ -355,11 +367,13 @@ impl StudioPanel {
                     .aria_label("Custom constants"),
             );
         for i in 0..3 {
-            let locked = match p.mode {
-                Mode::Expressions => false,
-                Mode::Spline(plane) => i != plane.axes().2,
-                Mode::Imported => true,
-            };
+            let constant = p.constant_axis() == Some(i);
+            let locked = constant
+                || match p.mode {
+                    Mode::Expressions => false,
+                    Mode::Spline(plane) => i != plane.axes().2,
+                    Mode::Imported => true,
+                };
             content = content.child(
                 column()
                     .gap_1()
@@ -373,10 +387,12 @@ impl StudioPanel {
                             )
                             .when(locked, |r| {
                                 r.child(caption(
-                                    if matches!(p.mode, Mode::Imported) {
-                                        "from reference"
+                                    if constant {
+                                        format!("constant {:.3} · slider", p.slices[i])
+                                    } else if matches!(p.mode, Mode::Imported) {
+                                        "from reference".into()
                                     } else {
-                                        "from spline"
+                                        "from spline".into()
                                     },
                                     cx,
                                 ))
@@ -577,10 +593,18 @@ impl StudioPanel {
         self.model.update(cx, |m, cx| {
             match m.project.mode {
                 Mode::Expressions => m.project.enable_spline(plane, &m.curve),
-                Mode::Spline(active) if active == plane => m.project.mode = Mode::Expressions,
+                Mode::Spline(active) if active == plane => m.project.use_expressions(),
                 _ => return,
             }
             m.rebuild(cx);
+        });
+    }
+    fn toggle_constant(&mut self, plane: Plane, cx: &mut Context<Self>) {
+        self.model.update(cx, |m, cx| {
+            if m.project.mode == Mode::Spline(plane) {
+                m.project.spline_constant = !m.project.spline_constant;
+                m.rebuild(cx);
+            }
         });
     }
     fn output(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -911,6 +935,20 @@ impl StudioPanel {
                             el.child(self.spline_tools(p.spline.as_ref(), cx))
                         }),
                 )
+                .when(active, |el| {
+                    let axis = plane.axes().2;
+                    let name = model::axis_name(axis);
+                    let tip = if p.spline_constant {
+                        format!("{name} = {:.3} for the whole colormap. The {name} slice slider changes this constant. Click to restore its saved expression",p.slices[axis])
+                    } else {
+                        format!("Hold {name} constant at this plane's slice value and bind the {name} slider to the colormap")
+                    };
+                    el.child(
+                        tool_button("spline-constant", include_bytes!("icons/constant.svg"), format!("Constant {name}"), tip)
+                            .selected(p.spline_constant)
+                            .on_click(cx.listener(move |this, _, _, cx| this.toggle_constant(plane, cx))),
+                    )
+                })
                 .child(
                     tool_button(
                         "spline-edit",
@@ -1070,34 +1108,43 @@ impl StudioPanel {
                         .join(" · ")
                 )
             };
-            bottom =
-                bottom
-                    .child(
-                        row()
-                            .h(px(24.))
-                            .child(div().flex_1().min_w_0().child(
-                                Slider::new(&m.sliders[axis]).accessibility_label(format!(
-                                    "{} slice",
-                                    model::axis_name(axis)
-                                )),
-                            ))
-                            .child(
-                                caption(
-                                    format!(
-                                        "{} {:.3}{}",
-                                        model::axis_name(axis),
-                                        p.slices[axis],
-                                        if axis == 2 { "°" } else { "" }
-                                    ),
-                                    cx,
-                                )
-                                .w(px(88.))
-                                .flex_shrink_0()
-                                .font_family("Consolas")
-                                .text_right(),
-                            ),
-                    )
-                    .child(caption(text, cx).truncate());
+            bottom = bottom
+                .child(
+                    row()
+                        .h(px(24.))
+                        .child(div().flex_1().min_w_0().child(
+                            Slider::new(&m.sliders[axis]).accessibility_label(format!(
+                                "{} slice{}",
+                                model::axis_name(axis),
+                                if p.constant_axis() == Some(axis) {
+                                    " and colormap constant"
+                                } else {
+                                    ""
+                                }
+                            )),
+                        ))
+                        .child(
+                            caption(
+                                format!(
+                                    "{} {:.3}{}",
+                                    model::axis_name(axis),
+                                    p.slices[axis],
+                                    if axis == 2 { "°" } else { "" }
+                                ),
+                                cx,
+                            )
+                            .w(px(88.))
+                            .flex_shrink_0()
+                            .font_family("Consolas")
+                            .text_color(rgb(if p.constant_axis() == Some(axis) {
+                                colors.accent
+                            } else {
+                                colors.muted
+                            }))
+                            .text_right(),
+                        ),
+                )
+                .child(caption(text, cx).truncate());
         }
         let content = column()
             .size_full()
@@ -1355,6 +1402,9 @@ impl StudioPanel {
         }
         if p.mode == Mode::Spline(plane) {
             help.push_str("\nDrag circular anchors or square handles. Ctrl locks anchor movement to x/y and snaps handles to x/y/their original direction. Moving an anchor preserves its handle offsets. Smooth joins adjust the middle parameter to retain C1.");
+            if p.spline_constant {
+                help.push_str(&format!("\nConstant mode: the {} slice slider also sets this channel for the whole colormap. Toggle constant mode off to restore its expression.",model::axis_name(plane.axes().2)));
+            }
         } else {
             help.push_str("\nUse the pencil button to enter or leave spline editing. A lock means another plane or the reference path owns the curve.");
         }

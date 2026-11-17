@@ -6,7 +6,7 @@ Verified on Windows with Rust `1.101.0-nightly (249c1e4e3 2026-11-05)`, GPUI Kit
 
 | Check | Result |
 | --- | --- |
-| `cargo test --all-targets` | 32 core tests passed; 3 GPU tests are opt-in; binary test target built successfully |
+| `cargo test --all-targets` | 35 core tests passed; 3 GPU tests are opt-in; binary test target built successfully |
 | `cargo test --lib -- --ignored --nocapture` | All three hardware GPU tests passed on the RTX 4050 |
 | `cargo test -p accesskit_windows --lib unavailable_window_returns_uia_error_without_panicking` | 1 targeted teardown regression passed |
 | `cargo clippy --all-targets -- -D warnings` | Passed |
@@ -50,6 +50,12 @@ Operation help uses a cancellable two-second timer that restarts on pointer move
 The light-theme GPU test additionally requires the grid's contrast to exceed the checker pattern's contrast at independently selected out-of-gamut pixels. This passes with the lighter checkerboard while all 1,435 interior color comparisons remain identical across themes. The updated slice capture was visually inspected. Native layout and icon interaction checks remain unverified; a separate layout preview is provided for manual review.
 
 Projection horizontal tick labels now sit at the top; the vertical C=0.40 and L=1.00 labels are omitted. Hue-zero labels sit one text row lower, with the dedicated marker clamped inside the right edge and coincident tick text suppressed. The output colorbar's parameter label uses theme-dependent black/white text with the opposite one-pixel glyph halo and no filled badge. These native drawing changes compile and pass the existing core checks; a separate label preview supports manual visual review.
+
+## Spline orthogonal constant binding
+
+The active spline plane has a constant toggle beside its edit button. Its slice value is the single source for the constant. Slider events rebuild the curve only when that slider owns the active constant; other slider changes remain view-only. The saved orthogonal expression stays intact and resumes when constant mode is disabled. Programmatic slider synchronization preserves saved f64 precision, and following the cursor preserves a constant H=360 endpoint.
+
+Three model regressions cover all three owning planes, slider minimum/maximum/interior values, coplanarity, untouched spline channels, OKLCH export, unrelated sliders, restoring expressions, save/load, older JSON without the flag, switching expression/import/spline modes, inactive invalid expressions, and rejecting invalid slice values. The separate `target/debug/okclrmp-constant-preview.exe` provides a native build for manual visual review; native interaction checks remain unverified.
 
 ## Anti-aliasing and mesh refinement
 

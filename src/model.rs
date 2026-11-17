@@ -113,6 +113,9 @@ pub struct Project {
     pub nodes: Vec<[f64; 2]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spline: Option<Spline>,
+    /// In spline mode, the omitted channel is the owning plane's slice value.
+    #[serde(default)]
+    pub spline_constant: bool,
     pub imported: Vec<Oklch>,
     pub slices: [f64; 3],
     pub cursor: f64,
@@ -184,6 +187,7 @@ impl Project {
             mode,
             nodes,
             spline: None,
+            spline_constant: false,
             imported: vec![],
             slices: [0.65, 0.10, 136.59],
             cursor: 0.5,
@@ -252,6 +256,10 @@ impl Project {
         let constants = expr::constants(&self.constants, &self.parameter)?;
         let mut channels = Vec::new();
         for a in 0..3 {
+            if self.constant_axis() == Some(a) {
+                channels.push(Expr::Number(self.slices[a]));
+                continue;
+            }
             let used = match self.mode {
                 Mode::Expressions => true,
                 Mode::Spline(p) => a == p.axes().2,
@@ -303,8 +311,25 @@ impl Project {
             })
             .collect();
         self.spline = Some(Spline::from_legacy(&points));
+        self.spline_constant = false;
         self.nodes.clear();
         self.mode = Mode::Spline(plane);
+    }
+    pub fn constant_axis(&self) -> Option<usize> {
+        match self.mode {
+            Mode::Spline(plane) if self.spline_constant => Some(plane.axes().2),
+            _ => None,
+        }
+    }
+    /// Returns whether the colormap changed, in addition to the slice view.
+    pub fn set_slice(&mut self, axis: usize, value: f64) -> bool {
+        let changed = self.slices[axis] != value;
+        self.slices[axis] = value;
+        changed && self.constant_axis() == Some(axis)
+    }
+    pub fn use_expressions(&mut self) {
+        self.mode = Mode::Expressions;
+        self.spline_constant = false;
     }
     pub fn pan_hue(&mut self, horizontal_fraction: f64) {
         self.hue_origin = (self.hue_origin - horizontal_fraction * 360.).rem_euclid(360.);
@@ -511,6 +536,133 @@ mod tests {
         p.expressions[0] = "invalid".into();
         assert!(p.compile().is_ok());
         p.expressions[2] = "invalid".into();
+        assert!(p.compile().is_err());
+    }
+    #[test]
+    fn constant_slider_changes_the_orthogonal_channel_only_in_all_planes() {
+        for plane in Plane::ALL {
+            let mut p = Project::preset(3);
+            let source = p.compile().unwrap();
+            p.enable_spline(plane, &source);
+            let original = p.compile().unwrap();
+            let expressions = p.expressions.clone();
+            let (x, y, axis) = plane.axes();
+            p.spline_constant = true;
+            assert_eq!(p.constant_axis(), Some(axis));
+            let constant = p.compile().unwrap();
+            for i in 0..=100 {
+                let t = i as f64 / 100.;
+                assert_eq!(constant.at(t).channel(axis), p.slices[axis]);
+                assert_eq!(constant.at(t).channel(x), original.at(t).channel(x));
+                assert_eq!(constant.at(t).channel(y), original.at(t).channel(y));
+            }
+            // Exercise both slider endpoints, including raw H=360, and an interior value.
+            for value in [0., denormalized(1., axis), [0.37, 0.21, 271.25][axis]] {
+                assert!(p.set_slice(axis, value));
+                assert!(!p.set_slice(axis, value));
+                let curve = p.compile().unwrap();
+                assert!(
+                    curve
+                        .sample(101)
+                        .iter()
+                        .all(|s| s.color.channel(axis) == value)
+                );
+                assert!(curve.intersections(plane, value).coplanar);
+                let csv =
+                    crate::exchange::export(&curve, 17, crate::exchange::ExportSpace::Oklch, false);
+                let colors =
+                    crate::exchange::parse(&csv, crate::exchange::ImportSpace::Oklch).unwrap();
+                assert!(
+                    colors
+                        .iter()
+                        .all(|c| (c.channel(axis) - value).abs() < 1e-7)
+                );
+            }
+            let before: Vec<_> = p
+                .compile()
+                .unwrap()
+                .sample(31)
+                .iter()
+                .map(|s| s.color)
+                .collect();
+            assert!(!p.set_slice(x, [0.2, 0.1, 90.][x]));
+            let after: Vec<_> = p
+                .compile()
+                .unwrap()
+                .sample(31)
+                .iter()
+                .map(|s| s.color)
+                .collect();
+            assert_eq!(before, after);
+            p.spline_constant = false;
+            assert_eq!(p.constant_axis(), None);
+            assert!(!p.set_slice(axis, [0.4, 0.2, 190.][axis]));
+            let restored = p.compile().unwrap();
+            for i in 0..=100 {
+                assert_eq!(restored.at(i as f64 / 100.), original.at(i as f64 / 100.));
+            }
+            assert_eq!(p.expressions, expressions);
+        }
+    }
+    #[test]
+    fn constant_mode_roundtrips_and_does_not_leak_into_other_curve_modes() {
+        let mut p = Project {
+            spline_constant: true,
+            ..Default::default()
+        };
+        p.set_slice(2, 271.25);
+        let encoded = serde_json::to_string(&p).unwrap();
+        let mut restored: Project = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(restored.constant_axis(), Some(2));
+        assert!(
+            restored
+                .compile()
+                .unwrap()
+                .sample(21)
+                .iter()
+                .all(|s| s.color.h == 271.25)
+        );
+        let mut old = serde_json::to_value(&p).unwrap();
+        old.as_object_mut().unwrap().remove("spline_constant");
+        let old: Project = serde_json::from_value(old).unwrap();
+        assert!(!old.spline_constant);
+        assert!((old.compile().unwrap().at(0.3).h - 136.59).abs() < 1e-10);
+        restored.use_expressions();
+        assert!(!restored.spline_constant);
+        assert_eq!(restored.constant_axis(), None);
+        assert!((restored.compile().unwrap().at(0.3).h - 136.59).abs() < 1e-10);
+        let curve = restored.compile().unwrap();
+        restored.enable_spline(Plane::Ch, &curve);
+        assert!(!restored.spline_constant);
+        restored.spline_constant = true;
+        assert_eq!(restored.constant_axis(), Some(0));
+        let curve = restored.compile().unwrap();
+        restored.enable_spline(Plane::Lh, &curve);
+        assert!(!restored.spline_constant);
+        assert_eq!(restored.constant_axis(), None);
+        restored.mode = Mode::Imported;
+        restored.imported = vec![Oklch::new(0.4, 0.05, 20.), Oklch::new(0.8, 0.15, 70.)];
+        restored.spline_constant = true;
+        assert_eq!(restored.constant_axis(), None);
+        assert!(!restored.set_slice(2, 190.));
+        let imported = restored.compile().unwrap();
+        assert_eq!(imported.at(0.), restored.imported[0]);
+        assert_eq!(imported.at(1.), restored.imported[1]);
+    }
+    #[test]
+    fn constant_mode_preserves_the_inactive_expression_and_validates_its_slice() {
+        let mut p = Project::default();
+        p.expressions[2] = "saved_unknown_expression".into();
+        assert!(p.compile().is_err());
+        p.spline_constant = true;
+        assert!(p.compile().is_ok());
+        assert_eq!(p.expressions[2], "saved_unknown_expression");
+        p.spline_constant = false;
+        assert!(p.compile().is_err());
+        p.spline_constant = true;
+        p.set_slice(2, f64::NAN);
+        assert!(p.compile().is_err());
+        p.set_slice(2, 361.);
         assert!(p.compile().is_err());
     }
     #[test]
