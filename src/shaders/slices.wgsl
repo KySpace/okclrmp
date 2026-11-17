@@ -17,21 +17,39 @@ fn encode(v: vec3<f32>) -> vec3<f32> {
     let a = max(v,vec3(0.0));
     return select(1.055*pow(a,vec3(1.0/2.4))-0.055,12.92*a,a<=vec3(0.0031308));
 }
+fn decode(v: vec3<f32>) -> vec3<f32> {
+    return select(pow((v+0.055)/1.055,vec3(2.4)),v/12.92,v<=vec3(0.04045));
+}
+fn slice_rgb(uv: vec2<f32>) -> vec3<f32> {
+    var lch = vec3(uv.x,(1.0-uv.y)*0.4,p.slice.z);
+    if p.size_plane.z>0.5 && p.size_plane.z<1.5 { lch = vec3(p.slice.x,(1.0-uv.y)*0.4,uv.x*360.0); }
+    if p.size_plane.z>1.5 { lch = vec3(1.0-uv.y,p.slice.y,uv.x*360.0); }
+    return linear_rgb(lch);
+}
 @compute @workgroup_size(8,8)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x>=u32(p.size_plane.x) || id.y>=u32(p.size_plane.y) { return; }
     let uv = (vec2<f32>(id.xy)+0.5)/p.size_plane.xy;
-    var lch = vec3(uv.x,(1.0-uv.y)*0.4,p.slice.z);
-    if p.size_plane.z>0.5 && p.size_plane.z<1.5 { lch = vec3(p.slice.x,(1.0-uv.y)*0.4,uv.x*360.0); }
-    if p.size_plane.z>1.5 { lch = vec3(1.0-uv.y,p.slice.y,uv.x*360.0); }
-    let rgb = linear_rgb(lch);
-    let valid = all(rgb>=vec3(-0.00001)) && all(rgb<=vec3(1.00001));
     let tile = f32((id.x/8u + id.y/8u)%2u);
-    var color = mix(vec3(0.085,0.098,0.12),vec3(0.102,0.116,0.14),tile);
-    if valid { color = encode(clamp(rgb,vec3(0.0),vec3(1.0))); }
-    // Fine graticule, deliberately subdued over the color field.
+    let background = decode(mix(vec3(0.085,0.098,0.12),vec3(0.102,0.116,0.14),tile));
+    // Compute shaders have no rasterizer/MSAA coverage. Integrate a regular
+    // 4x4 subpixel pattern to smooth the gamut silhouette without blurring the
+    // color field or changing the pointwise gamut test. Average in linear light.
+    var color = vec3(0.0);
+    for (var y=0u; y<4u; y++) {
+        for (var x=0u; x<4u; x++) {
+            let offset = (vec2<f32>(f32(x),f32(y))+0.5)/4.0;
+            let rgb = slice_rgb((vec2<f32>(id.xy)+offset)/p.size_plane.xy);
+            let valid = all(rgb>=vec3(-0.00001)) && all(rgb<=vec3(1.00001));
+            color += select(background,clamp(rgb,vec3(0.0),vec3(1.0)),valid);
+        }
+    }
+    color /= 16.0;
+    // Analytic pixel coverage for a 0.9px graticule, instead of a binary test
+    // that makes grid lines pop in/out as the viewport changes dimensions.
     let gx = abs(fract(uv.x*4.0+0.5)-0.5)*p.size_plane.x/4.0;
     let gy = abs(fract(uv.y*4.0+0.5)-0.5)*p.size_plane.y/4.0;
-    if min(gx,gy)<0.45 { color=mix(color,vec3(0.68,0.74,0.8),0.15); }
-    textureStore(output,vec2<i32>(id.xy),vec4(color,1.0));
+    let grid = clamp(0.95-min(gx,gy),0.0,1.0);
+    color = mix(color,decode(vec3(0.68,0.74,0.8)),grid*0.15);
+    textureStore(output,vec2<i32>(id.xy),vec4(encode(color),1.0));
 }

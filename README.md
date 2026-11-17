@@ -59,7 +59,17 @@ CSV files contain values only, with no header. Reference lists are limited to 16
 
 ## Rendering and compatibility
 
-The app uses **GPUI Kit 0.10.0**, including GPUI Component 0.10.0 and its pinned **gpui-pre 0.3.12**. WGPU 30 runs a compute shader for the three slice backgrounds and a depth-tested raster pipeline for the triangulated gamut roof. GPUI paints axes, curve segments, nodes, and reference overlays. Plot images are cached by viewport size and slice/camera values; changing an expression does not regenerate an unchanged background. Plotting has a display range of L 0–1, C 0–0.4, and H 0–360; values outside it are preserved in the model and export but can leave the visible plot.
+The app uses **GPUI Kit 0.10.0**, including GPUI Component 0.10.0 and its pinned **gpui-pre 0.3.12**. WGPU 30 runs a compute shader for the three slice backgrounds and a depth-tested raster pipeline for the gamut surface. GPUI paints axes, curve segments, nodes, and reference overlays. Plot images use physical display pixels and are cached by viewport size and slice/camera values; changing an expression does not regenerate an unchanged background. A uniform size cap preserves the aspect ratio on very large viewports. Plotting has a display range of L 0–1, C 0–0.4, and H 0–360; values outside it are preserved in the model and export but can leave the visible plot.
+
+The slice shader integrates a 4×4 subpixel pattern at gamut boundaries and filters its graticule. The 3D pipeline uses 4× MSAA when the color/depth formats support it, resolves in linear light to an sRGB image, and filters grid lines with screen-space derivatives. The mesh follows the actual six RGB boundary faces transformed into OKLCH. Adaptive edge samples share the saturated creases, avoiding the sawtooth ridge produced by an H/L grid cutting across those creases. This also preserves the real non-convex fold near blue. Triangles crossing the hue seam are clipped and the exposed chart edges are closed to C=0.
+
+Run the GPU quality regression explicitly:
+
+```powershell
+cargo test --lib anti_aliasing_matches_area_reference_on_gpu -- --ignored --nocapture
+```
+
+It compares gamut boundary pixels against an independent 16×16 area reference, checks odd image sizes, and writes small renders and large 3D close-ups under `.research/aa-after/`.
 
 The requested zero-copy bridges were investigated:
 

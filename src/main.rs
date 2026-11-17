@@ -81,7 +81,7 @@ fn check_gpu(gpu: &Gpu) -> anyhow::Result<()> {
                     // Exclude the deliberately blended graticule pixels.
                     let gx = (((u * 4. + 0.5).fract() - 0.5).abs()) * w as f64 / 4.;
                     let gy = ((((1. - v) * 4. + 0.5).fract() - 0.5).abs()) * h as f64 / 4.;
-                    if gx.min(gy) < 0.6 {
+                    if gx.min(gy) < 1. {
                         continue;
                     }
                     let c = match plane {
@@ -91,7 +91,19 @@ fn check_gpu(gpu: &Gpu) -> anyhow::Result<()> {
                     };
                     let linear = c.linear_rgb();
                     // Avoid pixels that can disagree across f32 / f64 boundary tolerance.
-                    if linear.iter().all(|v| *v > 0.0001 && *v < 0.9999) {
+                    let interior = [[-0.5, -0.5], [0.5, -0.5], [-0.5, 0.5], [0.5, 0.5]]
+                        .iter()
+                        .all(|[dx, dy]| {
+                            let u = u + dx / w as f64;
+                            let v = v + dy / h as f64;
+                            let c = match plane {
+                                Plane::Cl => Oklch::new(u, v * 0.4, p.slices[2]),
+                                Plane::Ch => Oklch::new(p.slices[0], v * 0.4, u * 360.),
+                                Plane::Lh => Oklch::new(v, p.slices[1], u * 360.),
+                            };
+                            c.linear_rgb().iter().all(|v| *v > 0.0001 && *v < 0.9999)
+                        });
+                    if interior && linear.iter().all(|v| *v > 0.0001 && *v < 0.9999) {
                         let expected = c.rgba8(false);
                         let offset = ((y * w + x) * 4) as usize;
                         for k in 0..3 {
@@ -120,7 +132,10 @@ fn check_gpu(gpu: &Gpu) -> anyhow::Result<()> {
                 colored > 500,
                 "3D gamut surface is blank or missing its colors"
             );
-            println!("3D: {colored} colored surface pixels rendered");
+            println!(
+                "3D: {colored} colored surface pixels rendered · {}x MSAA",
+                gpu.surface_sample_count()
+            );
         }
         image::save_buffer(
             format!(".research/gpu-check/{i}.png"),

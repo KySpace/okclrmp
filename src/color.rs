@@ -68,7 +68,9 @@ impl Oklch {
         format!("#{:02x}{:02x}{:02x}", a[0], a[1], a[2])
     }
     pub fn from_srgb(rgb: [f64; 3]) -> Self {
-        let [r, g, b] = rgb.map(decode);
+        Self::from_linear_rgb(rgb.map(decode))
+    }
+    pub fn from_linear_rgb([r, g, b]: [f64; 3]) -> Self {
         let l = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b).cbrt();
         let m = (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b).cbrt();
         let s = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b).cbrt();

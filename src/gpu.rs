@@ -1,27 +1,27 @@
 //! WGPU renders offscreen; the Kit snapshot's image API is the presentation bridge.
 //! Images are regenerated only for viewport / slice / camera changes, never per frame.
 use crate::{
-    color::{Oklch, max_chroma},
+    color::Oklch,
+    gamut_mesh::Vertex,
     model::{Plane, Project},
 };
 use anyhow::{Context, Result};
-use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct Vertex {
-    position: [f32; 3],
-    color: [f32; 3],
-}
+const SURFACE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+const MAX_IMAGE_SIDE: u32 = 4096;
+
 pub struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     slices: wgpu::ComputePipeline,
     surface: wgpu::RenderPipeline,
     mesh: wgpu::Buffer,
-    vertices: u32,
+    indices: wgpu::Buffer,
+    index_count: u32,
+    surface_samples: u32,
     pub adapter_name: String,
 }
 pub fn world(c: Oklch) -> Vec3 {
@@ -68,6 +68,17 @@ impl Gpu {
             .await
             .context("No WGPU graphics adapter")?;
         let adapter_name = adapter.get_info().name;
+        // Color, resolve target, and depth must support the same sample count.
+        let color_features = adapter.get_texture_format_features(SURFACE_FORMAT).flags;
+        let depth_features = adapter.get_texture_format_features(DEPTH_FORMAT).flags;
+        let surface_samples = if color_features.sample_count_supported(4)
+            && color_features.contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE)
+            && depth_features.sample_count_supported(4)
+        {
+            4
+        } else {
+            1
+        };
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("OKLCH plot renderer"),
@@ -91,14 +102,14 @@ impl Gpu {
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/gamut.wgsl").into()),
         });
         let surface = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Maximum chroma surface"),
+            label: Some("sRGB gamut boundary surface"),
             layout: None,
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs"),
                 compilation_options: Default::default(),
                 buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: 24,
+                    array_stride: std::mem::size_of::<Vertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x3],
                 })],
@@ -108,19 +119,22 @@ impl Gpu {
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
+                format: DEPTH_FORMAT,
                 depth_write_enabled: Some(true),
                 depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
-            multisample: Default::default(),
+            multisample: wgpu::MultisampleState {
+                count: surface_samples,
+                ..Default::default()
+            },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    format: SURFACE_FORMAT,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -128,55 +142,17 @@ impl Gpu {
             multiview_mask: None,
             cache: None,
         });
-        let mut data = Vec::new();
-        let nh = 180;
-        let nl = 80;
-        let vertex = |h: usize, l: usize| {
-            let light = l as f64 / nl as f64;
-            let hue = h as f64 / nh as f64 * 360.;
-            let chroma = max_chroma(light, hue);
-            let c = Oklch::new(light, chroma, hue);
-            Vertex {
-                position: [
-                    (hue / 360. * 1.8 - 0.9) as f32,
-                    (chroma / 0.4 * 1.2 - 0.3) as f32,
-                    (light * 1.3 - 0.65) as f32,
-                ],
-                color: c.srgb(false).map(|x| x as f32),
-            }
-        };
-        for h in 0..nh {
-            for l in 0..nl {
-                let a = vertex(h, l);
-                let b = vertex(h + 1, l);
-                let c = vertex(h, l + 1);
-                let d = vertex(h + 1, l + 1);
-                data.extend([a, b, c, c, b, d]);
-            }
-        }
-        // Close both hue edges down to the achromatic floor.
-        for h in [0, nh] {
-            for l in 0..nl {
-                let a = vertex(h, l);
-                let b = vertex(h, l + 1);
-                let mut c = a;
-                let mut d = b;
-                c.position[1] = -0.3;
-                d.position[1] = -0.3;
-                c.color = Oklch::new(l as f64 / nl as f64, 0., 0.)
-                    .srgb(false)
-                    .map(|x| x as f32);
-                d.color = Oklch::new((l + 1) as f64 / nl as f64, 0., 0.)
-                    .srgb(false)
-                    .map(|x| x as f32);
-                data.extend([a, b, c, c, b, d]);
-            }
-        }
-        let vertices = data.len() as u32;
+        let data = crate::gamut_mesh::build();
+        let index_count = data.indices.len() as u32;
         let mesh = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("sRGB gamut mesh"),
-            contents: bytemuck::cast_slice(&data),
+            contents: bytemuck::cast_slice(&data.vertices),
             usage: wgpu::BufferUsages::VERTEX,
+        });
+        let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Gamut face indices"),
+            contents: bytemuck::cast_slice(&data.indices),
+            usage: wgpu::BufferUsages::INDEX,
         });
         Ok(Self {
             device,
@@ -184,9 +160,21 @@ impl Gpu {
             slices,
             surface,
             mesh,
-            vertices,
+            indices,
+            index_count,
+            surface_samples,
             adapter_name,
         })
+    }
+    /// Physical render dimensions, capped uniformly to preserve the plot aspect.
+    pub fn image_size(&self, logical_width: f32, logical_height: f32, scale: f32) -> [u32; 2] {
+        image_size(logical_width, logical_height, scale, self.image_limit())
+    }
+    fn image_limit(&self) -> u32 {
+        MAX_IMAGE_SIDE.min(self.device.limits().max_texture_dimension_2d)
+    }
+    pub fn surface_sample_count(&self) -> u32 {
+        self.surface_samples
     }
     pub fn render(
         &self,
@@ -195,8 +183,11 @@ impl Gpu {
         width: u32,
         height: u32,
     ) -> Result<Vec<u8>> {
-        let width = width.clamp(64, 1200);
-        let height = height.clamp(64, 1000);
+        anyhow::ensure!(
+            width > 0 && height > 0 && width <= self.image_limit() && height <= self.image_limit(),
+            "Plot dimensions must be between 1 and {} physical pixels",
+            self.image_limit()
+        );
         let extent = wgpu::Extent3d {
             width,
             height,
@@ -208,10 +199,17 @@ impl Gpu {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::STORAGE_BINDING
-                | wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::COPY_SRC,
+            format: if plane.is_some() {
+                wgpu::TextureFormat::Rgba8Unorm
+            } else {
+                SURFACE_FORMAT
+            },
+            usage: wgpu::TextureUsages::COPY_SRC
+                | if plane.is_some() {
+                    wgpu::TextureUsages::STORAGE_BINDING
+                } else {
+                    wgpu::TextureUsages::RENDER_ATTACHMENT
+                },
             view_formats: &[],
         });
         let view = output.create_view(&Default::default());
@@ -285,27 +283,45 @@ impl Gpu {
                 label: None,
                 size: extent,
                 mip_level_count: 1,
-                sample_count: 1,
+                sample_count: self.surface_samples,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Depth32Float,
+                format: DEPTH_FORMAT,
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 view_formats: &[],
             });
             let depth_view = depth.create_view(&Default::default());
+            let multisampled = (self.surface_samples > 1).then(|| {
+                self.device
+                    .create_texture(&wgpu::TextureDescriptor {
+                        label: Some("4x MSAA gamut surface"),
+                        size: extent,
+                        mip_level_count: 1,
+                        sample_count: self.surface_samples,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: SURFACE_FORMAT,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        view_formats: &[],
+                    })
+                    .create_view(&Default::default())
+            });
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: None,
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: multisampled.as_ref().unwrap_or(&view),
                     depth_slice: None,
-                    resolve_target: None,
+                    resolve_target: multisampled.as_ref().map(|_| &view),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.047,
-                            g: 0.059,
-                            b: 0.078,
+                            r: crate::color::decode(0.047),
+                            g: crate::color::decode(0.059),
+                            b: crate::color::decode(0.078),
                             a: 1.,
                         }),
-                        store: wgpu::StoreOp::Store,
+                        store: if multisampled.is_some() {
+                            wgpu::StoreOp::Discard
+                        } else {
+                            wgpu::StoreOp::Store
+                        },
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -323,7 +339,8 @@ impl Gpu {
             pass.set_pipeline(&self.surface);
             pass.set_bind_group(0, &group, &[]);
             pass.set_vertex_buffer(0, self.mesh.slice(..));
-            pass.draw(0..self.vertices, 0..1);
+            pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..self.index_count, 0, 0..1);
         }
         let stride = (width * 4).div_ceil(256) * 256;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -367,5 +384,189 @@ impl Gpu {
         drop(mapped);
         buffer.unmap();
         Ok(result)
+    }
+}
+
+fn image_size(width: f32, height: f32, scale: f32, limit: u32) -> [u32; 2] {
+    let scale = if scale.is_finite() && scale > 0. {
+        scale
+    } else {
+        1.
+    };
+    let width = (width.max(1.) * scale).max(1.);
+    let height = (height.max(1.) * scale).max(1.);
+    let reduction = (limit as f32 / width.max(height)).min(1.);
+    [
+        (width * reduction).round().max(1.) as u32,
+        (height * reduction).round().max(1.) as u32,
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Gpu, image_size};
+    use crate::{
+        color::{Oklch, decode},
+        model::{Plane, Project},
+    };
+
+    #[test]
+    fn physical_images_follow_dpi_and_preserve_aspect_at_the_limit() {
+        assert_eq!(image_size(450., 160., 1.5, 4096), [675, 240]);
+        assert_eq!(image_size(450., 160., 2., 4096), [900, 320]);
+        assert_eq!(image_size(3000., 1500., 2., 4096), [4096, 2048]);
+        assert_eq!(image_size(1., 0., 1., 4096), [1, 1]);
+    }
+
+    fn slice_color(plane: Plane, p: &Project, x: f64, y: f64, w: u32, h: u32) -> Oklch {
+        let u = x / w as f64;
+        let v = 1. - y / h as f64;
+        match plane {
+            Plane::Cl => Oklch::new(u, v * 0.4, p.slices[2]),
+            Plane::Ch => Oklch::new(p.slices[0], v * 0.4, u * 360.),
+            Plane::Lh => Oklch::new(v, p.slices[1], u * 360.),
+        }
+    }
+    fn valid(rgb: [f64; 3]) -> bool {
+        rgb.iter().all(|v| *v >= -0.00001 && *v <= 1.00001)
+    }
+
+    /// An independent 16x16 area reference checks the silhouette rather than
+    /// duplicating the shader's lower-density sampling pattern.
+    #[test]
+    #[ignore = "requires a real WGPU adapter; writes .research/aa-after images"]
+    fn anti_aliasing_matches_area_reference_on_gpu() {
+        let gpu = Gpu::new().unwrap();
+        let p = Project::default();
+        let (w, h) = (256u32, 160u32);
+        std::fs::create_dir_all(".research/aa-after").unwrap();
+        for (index, plane) in Plane::ALL.into_iter().enumerate() {
+            let pixels = gpu.render(Some(plane), &p, w, h).unwrap();
+            let (mut count, mut aa_error, mut point_error) = (0, 0., 0.);
+            for y in 1..h - 1 {
+                for x in 1..w - 1 {
+                    let gx = ((((x as f64 + 0.5) / w as f64 * 4. + 0.5).fract() - 0.5).abs())
+                        * w as f64
+                        / 4.;
+                    let gy = ((((y as f64 + 0.5) / h as f64 * 4. + 0.5).fract() - 0.5).abs())
+                        * h as f64
+                        / 4.;
+                    if gx.min(gy) < 1. {
+                        continue;
+                    }
+                    let corners = [[0., 0.], [1., 0.], [0., 1.], [1., 1.]].map(|[dx, dy]| {
+                        valid(
+                            slice_color(plane, &p, x as f64 + dx, y as f64 + dy, w, h).linear_rgb(),
+                        )
+                    });
+                    if corners.iter().all(|v| *v) || corners.iter().all(|v| !*v) {
+                        continue;
+                    }
+                    let background = if (x / 8 + y / 8) % 2 == 0 {
+                        [0.085, 0.098, 0.12]
+                    } else {
+                        [0.102, 0.116, 0.14]
+                    }
+                    .map(decode);
+                    let sample = |sx: f64, sy: f64| {
+                        let rgb = slice_color(plane, &p, sx, sy, w, h).linear_rgb();
+                        if valid(rgb) {
+                            rgb.map(|v| v.clamp(0., 1.))
+                        } else {
+                            background
+                        }
+                    };
+                    let mut reference = [0.; 3];
+                    for sy in 0..16 {
+                        for sx in 0..16 {
+                            let value = sample(
+                                x as f64 + (sx as f64 + 0.5) / 16.,
+                                y as f64 + (sy as f64 + 0.5) / 16.,
+                            );
+                            for k in 0..3 {
+                                reference[k] += value[k] / 256.;
+                            }
+                        }
+                    }
+                    let point = sample(x as f64 + 0.5, y as f64 + 0.5);
+                    let offset = ((y * w + x) * 4) as usize;
+                    for k in 0..3 {
+                        aa_error +=
+                            (decode(pixels[offset + k] as f64 / 255.) - reference[k]).powi(2);
+                        point_error += (point[k] - reference[k]).powi(2);
+                    }
+                    count += 1;
+                }
+            }
+            assert!(count > 20, "Too few boundary pixels checked for {plane:?}");
+            assert!(
+                aa_error < point_error * 0.6,
+                "{plane:?}: AA error {aa_error} vs point-sampled {point_error}"
+            );
+            println!(
+                "{plane:?}: {count} boundary pixels, {:.1}% less area-reference error",
+                100. * (1. - aa_error / point_error)
+            );
+            image::save_buffer(
+                format!(".research/aa-after/{index}.png"),
+                &pixels,
+                w,
+                h,
+                image::ColorType::Rgba8,
+            )
+            .unwrap();
+        }
+        let pixels = gpu.render(None, &p, w, h).unwrap();
+        image::save_buffer(
+            ".research/aa-after/3.png",
+            &pixels,
+            w,
+            h,
+            image::ColorType::Rgba8,
+        )
+        .unwrap();
+        assert!(pixels.as_chunks::<4>().0.iter().all(|p| p[3] == 255));
+        println!(
+            "3D: {}x MSAA, {} triangles on {}",
+            gpu.surface_sample_count(),
+            gpu.index_count / 3,
+            gpu.adapter_name
+        );
+        let closeup = Project {
+            zoom: 1.65,
+            pitch: 0.55,
+            ..p.clone()
+        };
+        let pixels = gpu.render(None, &closeup, 1536, 640).unwrap();
+        image::save_buffer(
+            ".research/aa-after/gamut-closeup.png",
+            &pixels,
+            1536,
+            640,
+            image::ColorType::Rgba8,
+        )
+        .unwrap();
+        let orbit = Project {
+            yaw: 0.45,
+            pitch: 0.25,
+            zoom: 1.2,
+            ..p.clone()
+        };
+        let pixels = gpu.render(None, &orbit, 1536, 640).unwrap();
+        image::save_buffer(
+            ".research/aa-after/gamut-orbit.png",
+            &pixels,
+            1536,
+            640,
+            image::ColorType::Rgba8,
+        )
+        .unwrap();
+        // Odd physical sizes exercise row padding, compute bounds checks, and
+        // multisampled color/depth/resolve size agreement after DPI scaling.
+        for plane in [Some(Plane::Cl), Some(Plane::Ch), Some(Plane::Lh), None] {
+            let pixels = gpu.render(plane, &p, 257, 161).unwrap();
+            assert_eq!(pixels.len(), 257 * 161 * 4);
+            assert!(pixels.as_chunks::<4>().0.iter().all(|p| p[3] == 255));
+        }
     }
 }

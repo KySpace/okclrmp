@@ -787,8 +787,11 @@ impl StudioPanel {
                     this.bounds = bounds;
                     let m = this.model.read(cx);
                     let p = m.project.clone();
-                    let w = (f32::from(bounds.size.width).max(64.) as u32).min(1200);
-                    let h = (f32::from(bounds.size.height).max(64.) as u32).min(1000);
+                    let [w, h] = m.gpu.image_size(
+                        f32::from(bounds.size.width),
+                        f32::from(bounds.size.height),
+                        window.scale_factor(),
+                    );
                     let mut key = vec![w as u64, h as u64];
                     if let Some(plane) = plane {
                         key.push(p.slices[plane.axes().2].to_bits());
