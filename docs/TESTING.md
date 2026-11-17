@@ -6,8 +6,8 @@ Verified on Windows with Rust `1.101.0-nightly (249c1e4e3 2026-11-05)`, GPUI Kit
 
 | Check | Result |
 | --- | --- |
-| `cargo test --all-targets` | 32 core tests passed; 2 GPU tests are opt-in; binary test target built successfully |
-| `cargo test --lib -- --ignored --nocapture` | Both hardware GPU tests passed on the RTX 4050 |
+| `cargo test --all-targets` | 32 core tests passed; 3 GPU tests are opt-in; binary test target built successfully |
+| `cargo test --lib -- --ignored --nocapture` | All three hardware GPU tests passed on the RTX 4050 |
 | `cargo test -p accesskit_windows --lib unavailable_window_returns_uia_error_without_panicking` | 1 targeted teardown regression passed |
 | `cargo clippy --all-targets -- -D warnings` | Passed |
 | `cargo fmt --all --check` | Passed |
@@ -32,6 +32,24 @@ The new middle-button gestures and toolbar were compiled, and their geometry/con
 The main executable could not be replaced while the user's app was running (Windows error 5). A separate binary, `target/debug/okclrmp-hue-preview.exe`, built successfully from the current application sources and passed `--check-gpu`. The existing app session was left open.
 
 The AccessKit test is intentionally targeted; the other upstream AccessKit tests were not run.
+
+## Light and dark themes
+
+The toolbar switches GPUI's global component theme and the app-owned palette together, then notifies the shared model so all docked panels redraw. The plot image cache includes appearance. Colormap conversion and project state are independent of theme selection.
+
+`cargo test --lib themes_preserve_colormap_colors_and_refresh_plot_decoration_on_gpu -- --ignored --nocapture` passed on the RTX 4050. It checks 368 C–L, 512 C–H, and 555 L–H interior pixels for exact equality across themes, excluding graticule and gamut-boundary coverage. It also checks light/dark background values and opaque alpha in all three slices and both volume modes, and requires switching back to dark to restore every pixel exactly. Captures under `.research/themes/` were visually inspected. The existing hue and anti-aliasing GPU regressions also pass with the themed shader uniforms.
+
+The separate `target/debug/okclrmp-theme-preview.exe` built successfully without replacing the running app. Native clicking of its theme toggle remains unverified because Computer Use app approval timed out. The light/dark image checks above are direct WGPU checks, not native UI screenshots.
+
+## Compact plot layout
+
+The default center layout now contains C–L/C–H/L–H across the top and output/gamut volume below. Reset removes existing side/bottom docks before reinstalling the default layout, so previously moved panels do not remain duplicated. Slice and parameter readouts reserve 88 logical pixels beside their sliders. Projection toolbars use SVG icons on one row, retain the hidden middle-mode group's width, and keep the edit toggle outside the scrolling tool region in narrow panels.
+
+Operation help uses a cancellable two-second timer that restarts on pointer movement. The passive GPUI tooltip only renders while that position is still inside the plot; dragging, scrolling, clicking, pointer exit, and keyboard input dismiss it. No instructions take up plot-footer height.
+
+The light-theme GPU test additionally requires the grid's contrast to exceed the checker pattern's contrast at independently selected out-of-gamut pixels. This passes with the lighter checkerboard while all 1,435 interior color comparisons remain identical across themes. The updated slice capture was visually inspected. Native layout and icon interaction checks remain unverified; a separate layout preview is provided for manual review.
+
+Projection horizontal tick labels now sit at the top; the vertical C=0.40 and L=1.00 labels are omitted. Hue-zero labels sit one text row lower, with the dedicated marker clamped inside the right edge and coincident tick text suppressed. The output colorbar's parameter label uses theme-dependent black/white text with the opposite one-pixel glyph halo and no filled badge. These native drawing changes compile and pass the existing core checks; a separate label preview supports manual visual review.
 
 ## Anti-aliasing and mesh refinement
 

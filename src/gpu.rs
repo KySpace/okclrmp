@@ -1,6 +1,7 @@
 //! WGPU renders offscreen; the Kit snapshot's image API is the presentation bridge.
 //! Images are regenerated only for viewport / slice / camera changes, never per frame.
 use crate::{
+    appearance::Appearance,
     color::Oklch,
     gamut_mesh::{Mesh, Vertex},
     model::{Plane, Project},
@@ -215,6 +216,17 @@ impl Gpu {
         width: u32,
         height: u32,
     ) -> Result<Vec<u8>> {
+        self.render_themed(plane, p, width, height, Appearance::Dark)
+    }
+    pub fn render_themed(
+        &self,
+        plane: Option<Plane>,
+        p: &Project,
+        width: u32,
+        height: u32,
+        appearance: Appearance,
+    ) -> Result<Vec<u8>> {
+        let style = appearance.plots();
         anyhow::ensure!(
             width > 0 && height > 0 && width <= self.image_limit() && height <= self.image_limit(),
             "Plot dimensions must be between 1 and {} physical pixels",
@@ -256,7 +268,7 @@ impl Gpu {
                 Plane::Ch => 1.,
                 Plane::Lh => 2.,
             };
-            let data = [
+            let mut data = vec![
                 width as f32,
                 height as f32,
                 plane,
@@ -266,6 +278,10 @@ impl Gpu {
                 p.slices[2] as f32,
                 0.,
             ];
+            for color in [style.background, style.checker, style.grid] {
+                data.extend(color);
+                data.push(0.);
+            }
             let uniform = self
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -304,6 +320,12 @@ impl Gpu {
                 0.,
                 0.,
             ]);
+            matrix.extend(
+                style
+                    .volume_grid
+                    .map(|v| crate::color::decode(v as f64) as f32),
+            );
+            matrix.push(0.);
             let uniform = self
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -361,9 +383,9 @@ impl Gpu {
                     resolve_target: multisampled.as_ref().map(|_| &view),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: crate::color::decode(0.047),
-                            g: crate::color::decode(0.059),
-                            b: crate::color::decode(0.078),
+                            r: crate::color::decode(style.volume_background[0] as f64),
+                            g: crate::color::decode(style.volume_background[1] as f64),
+                            b: crate::color::decode(style.volume_background[2] as f64),
                             a: 1.,
                         }),
                         store: if multisampled.is_some() {
@@ -603,6 +625,115 @@ mod tests {
     }
     fn valid(rgb: [f64; 3]) -> bool {
         rgb.iter().all(|v| *v >= -0.00001 && *v <= 1.00001)
+    }
+
+    #[test]
+    #[ignore = "requires a real WGPU adapter; writes .research/themes images"]
+    fn themes_preserve_colormap_colors_and_refresh_plot_decoration_on_gpu() {
+        use crate::appearance::Appearance;
+        let gpu = Gpu::new().unwrap();
+        let mut p = Project::default();
+        let (w, h) = (256u32, 160u32);
+        std::fs::create_dir_all(".research/themes").unwrap();
+        for plane in [
+            Some(Plane::Cl),
+            Some(Plane::Ch),
+            Some(Plane::Lh),
+            None,
+            None,
+        ] {
+            let dark = gpu
+                .render_themed(plane, &p, w, h, Appearance::Dark)
+                .unwrap();
+            let light = gpu
+                .render_themed(plane, &p, w, h, Appearance::Light)
+                .unwrap();
+            assert_eq!(dark.len(), light.len());
+            assert!(light.as_chunks::<4>().0.iter().all(|p| p[3] == 255));
+            let corner = ((3 * w + 3) * 4) as usize;
+            assert!(dark[corner..corner + 3].iter().all(|c| *c < 45));
+            assert!(light[corner..corner + 3].iter().all(|c| *c > 220));
+            if plane == Some(Plane::Cl) {
+                // These three pixels lie outside the gamut. The grid should
+                // stand out more than the checker pattern beneath it.
+                let pixel = |x: u32| {
+                    let i = ((21 * w + x) * 4) as usize;
+                    &light[i..i + 3]
+                };
+                let checker_contrast: i32 = pixel(55)
+                    .iter()
+                    .zip(pixel(61))
+                    .map(|(a, b)| *a as i32 - *b as i32)
+                    .sum();
+                let grid_contrast: i32 = pixel(61)
+                    .iter()
+                    .zip(pixel(63))
+                    .map(|(a, b)| *a as i32 - *b as i32)
+                    .sum();
+                assert!(
+                    grid_contrast > checker_contrast,
+                    "The light-mode grid must contrast more than the checker pattern: {grid_contrast} vs {checker_contrast}"
+                );
+            }
+            if let Some(plane) = plane {
+                let mut checked = 0;
+                for y in (3..h - 1).step_by(5) {
+                    for x in (3..w - 1).step_by(7) {
+                        let gx = ((((x as f64 + 0.5) / w as f64 * 4. + 0.5).fract() - 0.5).abs())
+                            * w as f64
+                            / 4.;
+                        let gy = ((((y as f64 + 0.5) / h as f64 * 4. + 0.5).fract() - 0.5).abs())
+                            * h as f64
+                            / 4.;
+                        if gx.min(gy) < 1. {
+                            continue;
+                        }
+                        let interior =
+                            [[0., 0.], [1., 0.], [0., 1.], [1., 1.]]
+                                .iter()
+                                .all(|[dx, dy]| {
+                                    slice_color(plane, &p, x as f64 + dx, y as f64 + dy, w, h)
+                                        .linear_rgb()
+                                        .iter()
+                                        .all(|c| *c > 0.0001 && *c < 0.9999)
+                                });
+                        if interior {
+                            let i = ((y * w + x) * 4) as usize;
+                            assert_eq!(
+                                dark[i..i + 4],
+                                light[i..i + 4],
+                                "Theme altered {plane:?} colormap color at ({x},{y})"
+                            );
+                            checked += 1;
+                        }
+                    }
+                }
+                assert!(checked > 20);
+                println!("{plane:?}: {checked} colormap interior pixels identical across themes");
+            }
+            assert_eq!(
+                dark,
+                gpu.render_themed(plane, &p, w, h, Appearance::Dark)
+                    .unwrap(),
+                "Switching back must restore the dark plot exactly"
+            );
+            let name = plane
+                .map(|p| format!("{p:?}"))
+                .unwrap_or_else(|| if p.polar { "polar" } else { "volume" }.into());
+            for (theme, pixels) in [("dark", dark), ("light", light)] {
+                image::save_buffer(
+                    format!(".research/themes/{name}-{theme}.png"),
+                    &pixels,
+                    w,
+                    h,
+                    image::ColorType::Rgba8,
+                )
+                .unwrap();
+            }
+            if plane.is_none() {
+                p.polar = true;
+            }
+        }
     }
 
     /// An independent 16x16 area reference checks the silhouette rather than

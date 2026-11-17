@@ -1,43 +1,72 @@
 use gpui_kit::component::{
-    Disableable, Selectable, Sizable,
+    ActiveTheme, Disableable, Icon, Selectable, Sizable, Theme, ThemeMode,
     button::{Button, ButtonVariants},
     dock::{self, BasePanel, DockArea, DockLayout, DockPlacement, DockSkin, Panel, PanelEvent},
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
     slider::{Slider, SliderEvent, SliderState},
+    tooltip::Tooltip,
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use okclrmp::{
+    appearance::{Appearance, Palette},
     color::Oklch,
     exchange::{self, ExportSpace, ImportSpace},
     gpu::{self, Gpu},
     model::{self, CURVE_SAMPLES, Curve, Mode, Plane, Project, Sample},
     spline::{self, Drag, NodeMode, Side, Spline},
 };
-use std::sync::Arc;
+use std::{rc::Rc, sync::Arc, time::Duration};
 
-const BG: u32 = 0x0c0f14;
-const SURFACE: u32 = 0x11161e;
-const BORDER: u32 = 0x28313e;
-const TEXT: u32 = 0xdce4ed;
-const MUTED: u32 = 0x8492a6;
-const ACCENT: u32 = 0xa9d8bd;
-const WARNING: u32 = 0xff987e;
+const PLOT_HELP_DELAY: Duration = Duration::from_secs(2);
+fn tool_button(
+    id: impl Into<ElementId>,
+    svg: &[u8],
+    name: impl Into<SharedString>,
+    tip: impl Into<SharedString>,
+) -> Button {
+    Button::new(id)
+        .icon(Icon::default().data(svg))
+        .small()
+        .ghost()
+        .w(px(24.))
+        .h(px(24.))
+        .p_0()
+        .flex_shrink_0()
+        .accessibility_label(name)
+        .tooltip(tip)
+}
+
+fn appearance(cx: &App) -> Appearance {
+    if cx.theme().is_dark() {
+        Appearance::Dark
+    } else {
+        Appearance::Light
+    }
+}
+fn palette(cx: &App) -> Palette {
+    appearance(cx).palette()
+}
 fn column() -> Div {
     div().flex().flex_col().gap_3()
 }
 fn row() -> Div {
     div().flex().items_center().gap_2()
 }
-fn caption(s: impl Into<SharedString>) -> Div {
-    div().text_xs().text_color(rgb(MUTED)).child(s.into())
+fn caption(s: impl Into<SharedString>, cx: &App) -> Div {
+    let colors = palette(cx);
+    div()
+        .text_xs()
+        .text_color(rgb(colors.muted))
+        .child(s.into())
 }
-fn section(s: &str) -> Div {
+fn section(s: &str, cx: &App) -> Div {
+    let colors = palette(cx);
     div()
         .mt_2()
         .text_xs()
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(rgb(ACCENT))
+        .text_color(rgb(colors.accent))
         .child(s.to_string())
 }
 fn color_value(c: Oklch) -> Rgba {
@@ -119,7 +148,7 @@ impl StudioModel {
             project,
             curve,
             error: None,
-            notice: "Drag a spline node to shape the map. Drag panel tabs to rearrange.".into(),
+            notice: "Ready".into(),
             gpu,
             parameter,
             constants,
@@ -221,6 +250,9 @@ struct StudioPanel {
     selected_node: Option<usize>,
     orbit_start: Option<Point<Pixels>>,
     hue_pan_start: Option<Point<Pixels>>,
+    help_position: Option<Point<Pixels>>,
+    help_timer: Option<Task<()>>,
+    help_tooltip: Option<AnyTooltip>,
     export_space: ExportSpace,
     import_space: ImportSpace,
 }
@@ -238,25 +270,29 @@ impl StudioPanel {
             selected_node: None,
             orbit_start: None,
             hue_pan_start: None,
+            help_position: None,
+            help_timer: None,
+            help_tooltip: None,
             export_space: ExportSpace::Hex,
             import_space: ImportSpace::Hex,
         }
     }
     fn editor(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let colors = palette(cx);
         let m = self.model.read(cx);
         let p = m.project.clone();
         let current = m.curve.at(p.cursor);
         let mut content = column()
             .p_4()
             .gap_3()
-            .child(caption("DESIGN A PATH THROUGH COLOR"))
+            .child(caption("DESIGN A PATH THROUGH COLOR", cx))
             .child(
                 div()
                     .text_lg()
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(p.name.clone()),
             )
-            .child(section("STARTING POINTS"));
+            .child(section("STARTING POINTS", cx));
         for (i, name) in [
             "01  Monochrome",
             "02  Linear sweep",
@@ -280,7 +316,7 @@ impl StudioPanel {
         }
         let expressions = matches!(p.mode, Mode::Expressions);
         content = content
-            .child(section("CURVE DEFINITION"))
+            .child(section("CURVE DEFINITION", cx))
             .child(
                 row()
                     .child(
@@ -295,21 +331,24 @@ impl StudioPanel {
                                 })
                             })),
                     )
-                    .child(caption(match p.mode {
-                        Mode::Spline(plane) => format!("{} spline", plane.short()),
-                        Mode::Imported => "Imported path".into(),
-                        _ => "L · C · H".into(),
-                    })),
+                    .child(caption(
+                        match p.mode {
+                            Mode::Spline(plane) => format!("{} spline", plane.short()),
+                            Mode::Imported => "Imported path".into(),
+                            _ => "L · C · H".into(),
+                        },
+                        cx,
+                    )),
             )
             .child(
-                row().child(caption("Parameter").w_24()).child(
+                row().child(caption("Parameter", cx).w_24()).child(
                     Input::new(&m.parameter)
                         .small()
                         .aria_label("Parameter name"),
                 ),
             )
-            .child(caption("One parameter on [0, 1]. Hue is in degrees."))
-            .child(caption("Constants · name = value; …"))
+            .child(caption("One parameter on [0, 1]. Hue is in degrees.", cx))
+            .child(caption("Constants · name = value; …", cx))
             .child(
                 Input::new(&m.constants)
                     .small()
@@ -329,15 +368,18 @@ impl StudioPanel {
                             .child(
                                 div()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb([0xaacfe5, 0xe4c27e, 0xc6b3e8][i]))
+                                    .text_color(rgb(colors.channels[i]))
                                     .child(format!("{}({})", model::axis_name(i), p.parameter)),
                             )
                             .when(locked, |r| {
-                                r.child(caption(if matches!(p.mode, Mode::Imported) {
-                                    "from reference"
-                                } else {
-                                    "from spline"
-                                }))
+                                r.child(caption(
+                                    if matches!(p.mode, Mode::Imported) {
+                                        "from reference"
+                                    } else {
+                                        "from spline"
+                                    },
+                                    cx,
+                                ))
                             }),
                     )
                     .child(
@@ -355,47 +397,50 @@ impl StudioPanel {
                     div()
                         .p_2()
                         .rounded_md()
-                        .bg(rgb(0x362522))
+                        .bg(rgb(colors.error_background))
                         .text_xs()
-                        .text_color(rgb(WARNING))
+                        .text_color(rgb(colors.warning))
                         .child(error.clone()),
                 )
                 .child(caption(
                     "Plots show the last valid curve. Export is paused.",
+                    cx,
                 ));
         }
         if let Mode::Spline(plane) = p.mode
             && let Some(s) = &p.spline
         {
-            content = content.child(section("SPLINE NODES"));
+            content = content.child(section("SPLINE NODES", cx));
             for (i, n) in s.nodes.iter().enumerate() {
                 let v = plane.from_point(n.position);
                 content = content.child(
-                    caption(format!(
-                        "{} · {}={:.3}  ({:.4}, {:.4})",
-                        i + 1,
-                        p.parameter,
-                        s.parameter(i),
-                        v[0],
-                        v[1]
-                    ))
+                    caption(
+                        format!(
+                            "{} · {}={:.3}  ({:.4}, {:.4})",
+                            i + 1,
+                            p.parameter,
+                            s.parameter(i),
+                            v[0],
+                            v[1]
+                        ),
+                        cx,
+                    )
                     .font_family("Consolas"),
                 );
             }
-            content = content.child(caption("Edit nodes and handles in the active projection. Smooth keeps independent handle lengths; the middle parameter adjusts to preserve C1."));
         }
-        content=content.child(section("INSPECT THE PATH"))
-            .child(row().child(caption(format!("{} = {:.3}",p.parameter,p.cursor)).flex_1()).child(div().w_8().h_5().rounded_sm().bg(color_value(current))).child(caption(current.hex(true))))
-            .child(Slider::new(&m.sliders[3]).accessibility_label("Curve parameter"))
-            .child(caption(format!("L {:.4}   C {:.4}   H {:.2}°",current.l,current.c,current.h)).font_family("Consolas"))
+        content=content.child(section("INSPECT THE PATH", cx))
+            .child(row().child(div().w_8().h_5().rounded_sm().bg(color_value(current))).child(caption(current.hex(true), cx)))
+            .child(row().child(div().flex_1().min_w_0().child(Slider::new(&m.sliders[3]).accessibility_label("Curve parameter"))).child(caption(format!("{} {:.3}",p.parameter,p.cursor),cx).w(px(88.)).flex_shrink_0().font_family("Consolas").text_right()))
+            .child(caption(format!("L {:.4}   C {:.4}   H {:.2}°",current.l,current.c,current.h), cx).font_family("Consolas"))
             .child(Button::new("follow").label("Move slices to this color").small().w_full().on_click(cx.listener(|this,_,window,cx|this.model.update(cx,|m,cx|m.sync_slices(window,cx)))))
-            .child(section("EXPRESSION NOTES"))
-            .child(caption("+, −, *, /, ^ · comparisons · && · ||\ncondition ? a : b\nabs, sin, cos, sind, sqrt, min, max, clamp, mod, pi\nUse explicit * for multiplication."));
+            .child(section("EXPRESSION NOTES", cx))
+            .child(caption("+, −, *, /, ^ · comparisons · && · ||\ncondition ? a : b\nabs, sin, cos, sind, sqrt, min, max, clamp, mod, pi\nUse explicit * for multiplication.", cx));
         div()
             .id("editor-scroll")
             .size_full()
             .overflow_y_scroll()
-            .bg(rgb(SURFACE))
+            .bg(rgb(colors.surface))
             .child(content)
             .into_any_element()
     }
@@ -410,105 +455,136 @@ impl StudioPanel {
             }
         });
     }
-    fn spline_tools(&self, s: &Spline, cx: &Context<Self>) -> Div {
-        let mut tools = column().gap_1().child(
-            row()
-                .flex_wrap()
-                .gap_1()
-                .child(
-                    Button::new("cubic")
-                        .label("Cubic")
-                        .small()
-                        .selected(!s.linear)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.edit_spline(cx, |s| s.set_linear(false))
-                        })),
+    fn spline_tools(&self, s: Option<&Spline>, cx: &Context<Self>) -> Div {
+        let active = s.is_some();
+        let linear = s.is_none_or(|s| s.linear);
+        let middle = s.is_some_and(|s| s.nodes.len() == 3);
+        let symmetric = s.is_some_and(|s| s.symmetric);
+        let toggles = row()
+            .gap_0()
+            .flex_shrink_0()
+            .child(
+                tool_button(
+                    "curve-kind",
+                    include_bytes!("icons/cubic.svg"),
+                    "Cubic curve",
+                    if linear {
+                        "Use a cubic Bézier curve with editable handles"
+                    } else {
+                        "Use a straight line with two anchors and no handles"
+                    },
                 )
-                .child(
-                    Button::new("linear")
-                        .label("Line")
-                        .small()
-                        .selected(s.linear)
-                        .tooltip("Straight line · two nodes · no handles")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.edit_spline(cx, |s| s.set_linear(true))
-                        })),
+                .selected(!linear)
+                .disabled(!active)
+                .on_click(
+                    cx.listener(|this, _, _, cx| this.edit_spline(cx, |s| s.set_linear(!s.linear))),
+                ),
+            )
+            .child(
+                tool_button(
+                    "middle-node",
+                    include_bytes!("icons/middle-node.svg"),
+                    "Middle node",
+                    if linear {
+                        "Middle nodes require cubic mode"
+                    } else if middle {
+                        "Remove the middle node; preserve endpoint tangents"
+                    } else {
+                        "Add a middle node without changing the curve's shape"
+                    },
                 )
-                .child(
-                    Button::new("two-nodes")
-                        .label("2 nodes")
-                        .small()
-                        .selected(s.nodes.len() == 2)
-                        .tooltip("Remove the middle node; preserve endpoint tangents")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.edit_spline(cx, |s| s.remove_middle())
-                        })),
+                .selected(middle)
+                .disabled(linear)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.edit_spline(cx, |s| {
+                        if s.nodes.len() == 3 {
+                            s.remove_middle()
+                        } else {
+                            s.add_middle()
+                        }
+                    })
+                })),
+            )
+            .child(
+                tool_button(
+                    "symmetry",
+                    include_bytes!("icons/symmetry.svg"),
+                    "Symmetric editing",
+                    "Mirror endpoint heights and handles about their vertical midpoint",
                 )
-                .child(
-                    Button::new("three-nodes")
-                        .label("3 nodes")
-                        .small()
-                        .selected(s.nodes.len() == 3)
-                        .tooltip("Split the cubic at its midpoint without changing its shape")
-                        .on_click(
-                            cx.listener(|this, _, _, cx| this.edit_spline(cx, |s| s.add_middle())),
-                        ),
-                )
-                .child(
-                    Button::new("symmetry")
-                        .label("Symmetry")
-                        .small()
-                        .selected(s.symmetric)
-                        .tooltip("Mirror nodes and handles about the vertical axis")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.edit_spline(cx, |s| s.set_symmetry(!s.symmetric))
-                        })),
-                ),
-        );
-        if s.nodes.len() == 3 && !s.linear {
-            let mut modes = row().flex_wrap().gap_1().child(caption("Middle"));
-            for (i, mode, tip) in [
-                (
-                    0,
-                    NodeMode::Corner,
-                    "First click: free the tangents. Second click: remove middle handles.",
-                ),
-                (
-                    1,
-                    NodeMode::Smooth,
-                    "Snap to C1; dragging preserves the opposite handle length.",
-                ),
-                (2, NodeMode::Auto, "Solve C2 now; manual edits keep C1."),
-                (
-                    3,
-                    NodeMode::Symmetric,
-                    "Keep C1 and equal lengths; dragging changes both handles.",
-                ),
-            ] {
-                modes = modes.child(
-                    Button::new(("middle-mode", i as usize))
-                        .label(mode.label())
-                        .small()
-                        .selected(s.nodes[1].mode == mode)
-                        .tooltip(tip)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.edit_spline(cx, |s| s.set_middle_mode(mode))
-                        })),
-                );
-            }
-            tools = tools.child(modes);
+                .selected(symmetric)
+                .disabled(!active)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.edit_spline(cx, |s| s.set_symmetry(!s.symmetric))
+                })),
+            )
+            .when(!active, |el| el.invisible());
+        // Keep the middle-node tools' slot even when they are hidden.
+        let mut modes = row()
+            .gap_0()
+            .w(px(101.))
+            .flex_shrink_0()
+            .border_l_1()
+            .border_color(rgb(palette(cx).border))
+            .pl(px(4.));
+        for (i, mode, icon, name, tip) in [
+            (
+                0usize,
+                NodeMode::Corner,
+                include_bytes!("icons/corner.svg").as_slice(),
+                "Corner node",
+                "Corner: free the tangents on the first click; remove middle handles on the second",
+            ),
+            (
+                1,
+                NodeMode::Smooth,
+                include_bytes!("icons/smooth.svg").as_slice(),
+                "Smooth node",
+                "Smooth: align to C1; dragging keeps the opposite handle's length",
+            ),
+            (
+                2,
+                NodeMode::Auto,
+                include_bytes!("icons/auto-smooth.svg").as_slice(),
+                "Auto C2 node",
+                "Auto-smooth: solve C2 now; manual edits retain C1",
+            ),
+            (
+                3,
+                NodeMode::Symmetric,
+                include_bytes!("icons/symmetric-smooth.svg").as_slice(),
+                "Symmetric smooth node",
+                "Symmetric-smooth: keep C1 and equal handle lengths",
+            ),
+        ] {
+            modes = modes.child(
+                tool_button(("middle-mode", i), icon, name, tip)
+                    .selected(s.is_some_and(|s| middle && s.nodes[1].mode == mode))
+                    .disabled(!middle)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.edit_spline(cx, |s| s.set_middle_mode(mode))
+                    })),
+            );
         }
-        tools
+        row()
+            .gap_1()
+            .flex_shrink_0()
+            .child(toggles)
+            .child(modes.when(!middle, |el| el.invisible()))
     }
-    fn enable_spline(&mut self, plane: Plane, cx: &mut Context<Self>) {
+    fn toggle_spline(&mut self, plane: Plane, cx: &mut Context<Self>) {
+        self.spline_drag = None;
         self.model.update(cx, |m, cx| {
-            if matches!(m.project.mode, Mode::Expressions) {
-                m.project.enable_spline(plane, &m.curve);
-                m.rebuild(cx);
+            match m.project.mode {
+                Mode::Expressions => m.project.enable_spline(plane, &m.curve),
+                Mode::Spline(active) if active == plane => m.project.mode = Mode::Expressions,
+                _ => return,
             }
+            m.rebuild(cx);
         });
     }
     fn output(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let colors = palette(cx);
         let m = self.model.read(cx);
         let p = &m.project;
         let invalid = m.error.is_some();
@@ -536,25 +612,26 @@ impl StudioPanel {
                     if !col.in_gamut() {
                         window.paint_quad(fill(
                             Bounds::new(point(x, bounds.bottom() - px(3.)), size(w, px(3.))),
-                            rgb(WARNING),
+                            rgb(colors.warning),
                         ));
                     }
                 }
                 let x = bounds.origin.x + bounds.size.width * cursor as f32;
-                line(
-                    point(x, bounds.top()),
-                    point(x, bounds.bottom()),
-                    2.,
-                    0xffffff,
-                    window,
-                );
-                label(
+                for (width, color) in [(4., colors.curve_outline), (2., colors.curve)] {
+                    line(
+                        point(x, bounds.top()),
+                        point(x, bounds.bottom()),
+                        width,
+                        color,
+                        window,
+                    );
+                }
+                outlined_label(
                     format!("{param} = {cursor:.3}"),
                     point(
                         (x + px(5.)).min(bounds.right() - px(85.)),
                         bounds.top() + px(4.),
                     ),
-                    0xffffff,
                     window,
                     cx,
                 );
@@ -562,7 +639,7 @@ impl StudioPanel {
         )
         .h(px(50.))
         .w_full();
-        let mut controls = row().flex_wrap().gap_2().child(caption("Samples"));
+        let mut controls = row().flex_wrap().gap_2().child(caption("Samples", cx));
         for n in [16, 64, 256, 1024] {
             controls = controls.child(
                 Button::new(("count", n))
@@ -596,7 +673,7 @@ impl StudioPanel {
             .w_full()
             .p_3()
             .gap_2()
-            .bg(rgb(SURFACE))
+            .bg(rgb(colors.surface))
             .child(
                 row()
                     .flex_wrap()
@@ -606,7 +683,7 @@ impl StudioPanel {
                             .text_sm()
                             .child(format!("{count} colors · evenly sampled on [0, 1]")),
                     )
-                    .child(caption(format!("{oog} outside sRGB")))
+                    .child(caption(format!("{oog} outside sRGB"), cx))
                     .child(
                         Button::new("mapping")
                             .label(if p.map_chroma {
@@ -664,17 +741,17 @@ impl StudioPanel {
             .child(
                 row()
                     .justify_between()
-                    .child(caption("0.0"))
-                    .child(caption("Coral underline = original path outside sRGB"))
-                    .child(caption("1.0")),
+                    .child(caption("0.0", cx))
+                    .child(caption("Coral underline = original path outside sRGB", cx))
+                    .child(caption("1.0", cx)),
             )
             .child(controls)
-            .child(caption(preview).font_family("Consolas").truncate());
+            .child(caption(preview, cx).font_family("Consolas").truncate());
         div()
             .id("output-scroll")
             .size_full()
             .overflow_y_scroll()
-            .bg(rgb(SURFACE))
+            .bg(rgb(colors.surface))
             .child(content)
             .into_any_element()
     }
@@ -707,6 +784,7 @@ impl StudioPanel {
         .detach();
     }
     fn importer(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let colors = palette(cx);
         let m = self.model.read(cx);
         let imported = m.project.imported.clone();
         let mut spaces = row();
@@ -725,32 +803,29 @@ impl StudioPanel {
                     })),
             );
         }
-        let mut content=column().p_4().child(caption("COMPARE AN EXISTING COLORMAP"))
+        let mut content=column().p_4().child(caption("COMPARE AN EXISTING COLORMAP", cx))
             .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child("Reference colors"))
             .child(spaces)
-            .child(caption("Paste hex colors, a JSON array of triples, or three CSV columns. OKLCH uses L 0–1, C, and H in degrees."))
+            .child(caption("Paste hex colors, a JSON array of triples, or three CSV columns. OKLCH uses L 0–1, C, and H in degrees.", cx))
             .child(Textarea::new(&m.import_text).h(px(180.)).font_family("Consolas").aria_label("Reference colors to import"))
             .child(row().child(Button::new("plot-reference").label("Plot colors").small().primary().on_click(cx.listener(|this,_,_,cx|this.import_colors(cx))))
                 .child(Button::new("read-reference").label("Open file…").small().on_click(cx.listener(|this,_,window,cx|this.open_reference(window,cx)))))
-            .child(caption(format!("{} reference points",imported.len())))
+            .child(caption(format!("{} reference points",imported.len()), cx))
             .child(Button::new("use-reference").label("Use as colormap path").small().disabled(imported.len()<2).on_click(cx.listener(|this,_,_,cx|this.model.update(cx,|m,cx|{m.project.mode=Mode::Imported;m.rebuild(cx);m.notice="Reference path uses piecewise linear OKLCH interpolation with shortest hue arcs.".into();}))))
             .child(Button::new("clear-reference").label("Clear reference overlay").small().disabled(imported.is_empty()).on_click(cx.listener(|this,_,_,cx|this.model.update(cx,|m,cx|{
                 if m.project.mode==Mode::Imported{m.project.mode=Mode::Expressions;}m.project.imported.clear();m.rebuild(cx);
             }))))
-            .child(section("PROJECTION DEPTH"))
-            .child(caption("Points near the slice are small and sharp. Distant points become larger, softer circles. All imported points remain in OKLCH."));
+            .child(section("PROJECTION DEPTH", cx))
+            .child(caption("Points near the slice are small and sharp. Distant points become larger, softer circles. All imported points remain in OKLCH.", cx));
         for (i, c) in imported.iter().take(32).enumerate() {
             content = content.child(
                 row()
                     .child(div().w_5().h_5().rounded_sm().bg(color_value(*c)))
                     .child(
-                        caption(format!(
-                            "{:02}  L {:.3}  C {:.3}  H {:.1}",
-                            i + 1,
-                            c.l,
-                            c.c,
-                            c.h
-                        ))
+                        caption(
+                            format!("{:02}  L {:.3}  C {:.3}  H {:.1}", i + 1, c.l, c.c, c.h),
+                            cx,
+                        )
                         .font_family("Consolas"),
                     ),
             );
@@ -759,7 +834,7 @@ impl StudioPanel {
             .id("import-scroll")
             .size_full()
             .overflow_y_scroll()
-            .bg(rgb(SURFACE))
+            .bg(rgb(colors.surface))
             .child(content)
             .into_any_element()
     }
@@ -811,47 +886,67 @@ impl StudioPanel {
         .detach();
     }
     fn plot(&mut self, plane: Option<Plane>, cx: &mut Context<Self>) -> AnyElement {
+        let colors = palette(cx);
         let m = self.model.read(cx);
         let p = &m.project;
-        let mut header = row().h(px(24.)).child(
-            caption(if let Some(plane) = plane {
-                let (_, _, a) = plane.axes();
-                format!(
-                    "{} = {:.3}{}",
-                    model::axis_name(a),
-                    p.slices[a],
-                    if a == 2 { "°" } else { "" }
-                )
-            } else {
-                if p.polar {
-                    "C radius · H azimuth · L up"
-                } else {
-                    "H × L floor · C height"
-                }
-                .into()
-            })
-            .flex_1(),
-        );
+        let mut header = row().gap_1().h(px(24.)).flex_shrink_0();
         if let Some(plane) = plane {
             let active = p.mode == Mode::Spline(plane);
             let locked =
                 matches!(p.mode,Mode::Spline(other)if other!=plane) || p.mode == Mode::Imported;
-            header = header.child(
-                Button::new("spline")
-                    .label(if active {
-                        "● Editing spline"
-                    } else if locked {
-                        "Projected · locked"
-                    } else {
-                        "Edit spline"
-                    })
-                    .small()
+            let tip=match p.mode {
+                Mode::Expressions=>format!("Edit a spline in {}; the orthogonal {} channel remains an expression",plane.short(),model::axis_name(plane.axes().2)),
+                Mode::Spline(owner) if owner==plane=>"Quit spline editing and return to the saved L, C, and H expressions".into(),
+                Mode::Spline(owner)=>format!("Locked: {} owns the spline channels. Quit spline editing there to edit this plane",owner.short()),
+                Mode::Imported=>"Locked: reference colors define this path. Switch to Expressions to edit a spline".into(),
+            };
+            header = header
+                .child(
+                    div()
+                        .id("spline-tool-scroll")
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_x_scroll()
+                        .when(active, |el| {
+                            el.child(self.spline_tools(p.spline.as_ref(), cx))
+                        }),
+                )
+                .child(
+                    tool_button(
+                        "spline-edit",
+                        if locked {
+                            include_bytes!("icons/locked.svg")
+                        } else {
+                            include_bytes!("icons/edit-curve.svg")
+                        },
+                        if locked {
+                            "Spline editing locked"
+                        } else if active {
+                            "Quit spline editing"
+                        } else {
+                            "Edit spline"
+                        },
+                        tip,
+                    )
                     .selected(active)
                     .disabled(locked)
-                    .on_click(cx.listener(move |this, _, _, cx| this.enable_spline(plane, cx))),
-            );
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_spline(plane, cx))),
+                );
         } else {
             header = header
+                .child(
+                    caption(
+                        if p.polar {
+                            "C radius · H azimuth · L up"
+                        } else {
+                            "H × L floor · C height"
+                        },
+                        cx,
+                    )
+                    .flex_1()
+                    .min_w_0()
+                    .truncate(),
+                )
                 .child(
                     Button::new("polar-view")
                         .label("Polar")
@@ -885,6 +980,9 @@ impl StudioPanel {
             move |bounds, window, cx| {
                 weak.update(cx, |this, cx| {
                     this.bounds = bounds;
+                    if let Some(tooltip) = &this.help_tooltip {
+                        window.set_tooltip(tooltip.clone());
+                    }
                     let m = this.model.read(cx);
                     let p = m.project.clone();
                     let [w, h] = m.gpu.image_size(
@@ -892,7 +990,8 @@ impl StudioPanel {
                         f32::from(bounds.size.height),
                         window.scale_factor(),
                     );
-                    let mut key = vec![w as u64, h as u64];
+                    let appearance = appearance(cx);
+                    let mut key = vec![w as u64, h as u64, appearance as u64];
                     if let Some(plane) = plane {
                         key.push(p.slices[plane.axes().2].to_bits());
                         if plane.axes().0 == 2 {
@@ -908,7 +1007,7 @@ impl StudioPanel {
                         ]);
                     }
                     if this.cache.as_ref().is_none_or(|(k, _)| *k != key) {
-                        match m.gpu.render(plane, &p, w, h) {
+                        match m.gpu.render_themed(plane, &p, w, h, appearance) {
                             Ok(mut pixels) => {
                                 for rgba in pixels.as_chunks_mut::<4>().0 {
                                     rgba.swap(0, 2);
@@ -953,8 +1052,8 @@ impl StudioPanel {
         .size_full();
         let mut bottom = column().gap_1();
         if let Some(plane) = plane {
-            let (_, _, a) = plane.axes();
-            let intersections = m.curve.intersections(plane, p.slices[a]);
+            let (_, _, axis) = plane.axes();
+            let intersections = m.curve.intersections(plane, p.slices[axis]);
             let text = if intersections.coplanar {
                 "Entire curve lies in this slice".into()
             } else if intersections.points.is_empty() {
@@ -971,46 +1070,42 @@ impl StudioPanel {
                         .join(" · ")
                 )
             };
-            bottom = bottom
-                .when(plane.axes().0 == 2, |el| {
-                    el.child(caption(
-                        "Middle-drag = pan cyclic hue · linked to the other hue views",
-                    ))
-                })
-                .when(p.mode == Mode::Spline(plane), |el| {
-                    el.child(caption(
-                        "Drag circles = nodes · squares = handles · Ctrl = axis / direction snap",
-                    ))
-                })
-                .child(
-                    Slider::new(&m.sliders[a])
-                        .accessibility_label(format!("{} slice", model::axis_name(a))),
-                )
-                .child(caption(text).truncate());
-        } else {
-            bottom = bottom
-                .child(caption(
-                    "Left-drag = orbit · middle-drag = hue origin · scroll = zoom",
-                ))
-                .child(caption(if p.polar {
-                    "C=0 is the vertical axis · white up · coral dashes = out of gamut"
-                } else {
-                    "Surface color = maximum chroma · coral dashes = out of gamut"
-                }));
+            bottom =
+                bottom
+                    .child(
+                        row()
+                            .h(px(24.))
+                            .child(div().flex_1().min_w_0().child(
+                                Slider::new(&m.sliders[axis]).accessibility_label(format!(
+                                    "{} slice",
+                                    model::axis_name(axis)
+                                )),
+                            ))
+                            .child(
+                                caption(
+                                    format!(
+                                        "{} {:.3}{}",
+                                        model::axis_name(axis),
+                                        p.slices[axis],
+                                        if axis == 2 { "°" } else { "" }
+                                    ),
+                                    cx,
+                                )
+                                .w(px(88.))
+                                .flex_shrink_0()
+                                .font_family("Consolas")
+                                .text_right(),
+                            ),
+                    )
+                    .child(caption(text, cx).truncate());
         }
-        let mut content = column()
+        let content = column()
             .size_full()
             .min_h_0()
             .p_2()
             .gap_1()
-            .bg(rgb(SURFACE))
+            .bg(rgb(colors.surface))
             .child(header);
-        if let Some(plane) = plane
-            && p.mode == Mode::Spline(plane)
-            && let Some(spline) = &p.spline
-        {
-            content = content.child(self.spline_tools(spline, cx));
-        }
         content
             .child(
                 div()
@@ -1022,7 +1117,7 @@ impl StudioPanel {
                     .overflow_hidden()
                     .rounded_md()
                     .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(colors.border))
                     .child(canvas)
                     .on_mouse_down(
                         MouseButton::Left,
@@ -1030,16 +1125,28 @@ impl StudioPanel {
                             this.mouse_down(event.position, window, cx)
                         }),
                     )
-                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                         if event.pressed_button == Some(MouseButton::Left) {
+                            this.dismiss_help(cx);
                             this.mouse_move(event.position, event.modifiers.control, cx);
                         } else if event.pressed_button == Some(MouseButton::Middle) {
+                            this.dismiss_help(cx);
                             this.pan_hue(event.position, cx);
+                        } else if event.pressed_button.is_none() {
+                            this.arm_help(event.position, window, cx);
+                        } else {
+                            this.dismiss_help(cx);
+                        }
+                    }))
+                    .on_hover(cx.listener(|this, hovered, _, cx| {
+                        if !hovered {
+                            this.dismiss_help(cx);
                         }
                     }))
                     .on_mouse_down(
                         MouseButton::Middle,
                         cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                            this.dismiss_help(cx);
                             if matches!(
                                 this.kind,
                                 Kind::Plot(None) | Kind::Plot(Some(Plane::Ch | Plane::Lh))
@@ -1048,6 +1155,10 @@ impl StudioPanel {
                                 cx.stop_propagation();
                             }
                         }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, _, _, cx| this.dismiss_help(cx)),
                     )
                     .on_mouse_up(
                         MouseButton::Middle,
@@ -1072,6 +1183,7 @@ impl StudioPanel {
                         }),
                     )
                     .on_scroll(cx.listener(move |this, event: &ScrollEvent, _, cx| {
+                        this.dismiss_help(cx);
                         if plane.is_none() {
                             let delta = event.delta.pixel_delta(px(20.));
                             this.model.update(cx, |m, cx| {
@@ -1095,6 +1207,7 @@ impl StudioPanel {
         ]
     }
     fn mouse_down(&mut self, pos: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss_help(cx);
         let Kind::Plot(plane) = self.kind else {
             return;
         };
@@ -1178,6 +1291,75 @@ impl StudioPanel {
             });
         }
     }
+    fn dismiss_help(&mut self, cx: &mut Context<Self>) {
+        self.help_timer = None;
+        self.help_position = None;
+        if self.help_tooltip.take().is_some() {
+            cx.notify();
+        }
+    }
+    fn arm_help(&mut self, pos: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.help_position == Some(pos) {
+            return;
+        }
+        self.dismiss_help(cx);
+        self.help_position = Some(pos);
+        self.help_timer = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(PLOT_HELP_DELAY).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.help_position != Some(pos)
+                    || window.mouse_position() != pos
+                    || !this.bounds.contains(&pos)
+                    || window.last_input_was_keyboard()
+                {
+                    return;
+                }
+                let text = this.plot_help(cx);
+                let weak = cx.weak_entity();
+                this.help_tooltip = Some(AnyTooltip {
+                    view: Tooltip::new(text).max_w(px(380.)).build(window, cx),
+                    mouse_position: pos,
+                    check_visible_and_update: Rc::new(move |_, window, cx| {
+                        weak.upgrade().is_some_and(|panel| {
+                            let panel = panel.read(cx);
+                            panel.help_position == Some(pos)
+                                && panel.help_tooltip.is_some()
+                                && panel.bounds.contains(&window.mouse_position())
+                                && window.mouse_position() == pos
+                                && !window.last_input_was_keyboard()
+                        })
+                    }),
+                });
+                cx.notify();
+            });
+        }));
+    }
+    fn plot_help(&self, cx: &App) -> String {
+        let Kind::Plot(plane) = self.kind else {
+            return String::new();
+        };
+        let p = &self.model.read(cx).project;
+        let Some(plane) = plane else {
+            return format!(
+                "Left-drag to orbit. Middle-drag horizontally to move the hue origin. Scroll to zoom.\n{}\nCoral dashes mark the path outside sRGB.",
+                if p.polar {
+                    "Chroma is radius, hue is azimuth. The vertical C=0 axis runs from black to white."
+                } else {
+                    "Hue and lightness form the floor; chroma is height. Surface colors follow the sRGB boundary."
+                }
+            );
+        };
+        let mut help="Click the path to inspect its parameter. Colored dots mark intersections with this slice. Coral dashes mark colors outside sRGB.".to_string();
+        if plane.axes().0 == 2 {
+            help.push_str("\nMiddle-drag horizontally to pan the shared cyclic hue origin.");
+        }
+        if p.mode == Mode::Spline(plane) {
+            help.push_str("\nDrag circular anchors or square handles. Ctrl locks anchor movement to x/y and snaps handles to x/y/their original direction. Moving an anchor preserves its handle offsets. Smooth joins adjust the middle parameter to retain C1.");
+        } else {
+            help.push_str("\nUse the pencil button to enter or leave spline editing. A lock means another plane or the reference path owns the curve.");
+        }
+        help
+    }
 }
 impl BasePanel for StudioPanel {
     fn panel_name(&self) -> &'static str {
@@ -1255,13 +1437,57 @@ fn label(text: String, p: Point<Pixels>, color: u32, window: &mut Window, cx: &m
             len,
             font: font("Consolas"),
             color: rgb(color).into(),
-            background_color: Some(rgb(0x101722).into()),
+            background_color: Some(rgb(palette(cx).label_background).into()),
             underline: None,
             strikethrough: None,
         }],
         None,
     );
     let _ = line.paint(p, px(15.), TextAlign::Left, None, window, cx);
+}
+fn outlined_label(text: String, p: Point<Pixels>, window: &mut Window, cx: &mut App) {
+    let (foreground, outline) = match appearance(cx) {
+        Appearance::Dark => (0xffffff, 0x000000),
+        Appearance::Light => (0x000000, 0xffffff),
+    };
+    let shape = |color| {
+        window.text_system().shape_line(
+            text.clone().into(),
+            px(11.),
+            &[TextRun {
+                len: text.len(),
+                font: font("Consolas"),
+                color: rgb(color).into(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }],
+            None,
+        )
+    };
+    let halo = shape(outline);
+    let fill = shape(foreground);
+    // A one-pixel glyph halo stays visible over every color in the bar.
+    for (dx, dy) in [
+        (-1., 0.),
+        (1., 0.),
+        (0., -1.),
+        (0., 1.),
+        (-0.707, -0.707),
+        (-0.707, 0.707),
+        (0.707, -0.707),
+        (0.707, 0.707),
+    ] {
+        let _ = halo.paint(
+            point(p.x + px(dx), p.y + px(dy)),
+            px(15.),
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
+    }
+    let _ = fill.paint(p, px(15.), TextAlign::Left, None, window, cx);
 }
 fn paint_plot(
     bounds: Bounds<Pixels>,
@@ -1272,6 +1498,7 @@ fn paint_plot(
     window: &mut Window,
     cx: &mut App,
 ) {
+    let colors = palette(cx);
     let aspect = f32::from(bounds.size.width) / f32::from(bounds.size.height).max(1.);
     let project = |c: Oklch| -> Option<Point<Pixels>> {
         let q = if let Some(plane) = plane {
@@ -1289,10 +1516,15 @@ fn paint_plot(
     };
     if let Some(plane) = plane {
         let (x, y, _) = plane.axes();
+        let zero_x =
+            bounds.left() + bounds.size.width * model::hue_position(0., p.hue_origin) as f32;
         for i in 0..=4 {
             let v = i as f32 / 4.;
+            let hue_tick = (p.hue_origin + i as f64 * 90.).rem_euclid(360.);
+            let zero_tick = x == 2 && hue_tick.abs() < 1e-10;
+            let tick_x = (bounds.left() + bounds.size.width * v).min(bounds.right() - px(32.));
             let x_label = if x == 2 {
-                format!("{:.0}°", (p.hue_origin + i as f64 * 90.).rem_euclid(360.))
+                format!("{hue_tick:.0}°")
             } else {
                 format!("{v:.2}")
             };
@@ -1301,24 +1533,24 @@ fn paint_plot(
             } else {
                 format!("{v:.2}")
             };
-            label(
-                x_label,
-                point(
-                    (bounds.left() + bounds.size.width * v).min(bounds.right() - px(32.)),
-                    bounds.bottom() - px(16.),
-                ),
-                MUTED,
-                window,
-                cx,
-            );
-            if i > 0 {
+            // The dedicated zero-hue marker supplies a coincident tick label.
+            if !zero_tick || f32::from(tick_x - zero_x).abs() > 24. {
+                label(
+                    x_label,
+                    point(tick_x, bounds.top() + px(if zero_tick { 18. } else { 2. })),
+                    colors.muted,
+                    window,
+                    cx,
+                );
+            }
+            if i > 0 && i < 4 {
                 label(
                     y_label,
                     point(
                         bounds.left() + px(4.),
                         (bounds.bottom() - bounds.size.height * v).max(bounds.top() + px(2.)),
                     ),
-                    MUTED,
+                    colors.muted,
                     window,
                     cx,
                 );
@@ -1326,38 +1558,45 @@ fn paint_plot(
         }
         label(
             model::axis_name(y).into(),
-            point(bounds.left() + px(5.), bounds.top() + px(18.)),
-            TEXT,
+            point(
+                bounds.left() + px(5.),
+                bounds.top() + px(if x == 2 { 34. } else { 18. }),
+            ),
+            colors.text,
             window,
             cx,
         );
         label(
             model::axis_name(x).into(),
-            point(bounds.right() - px(14.), bounds.bottom() - px(32.)),
-            TEXT,
+            point(
+                bounds.right() - px(14.),
+                bounds.top() + px(if x == 2 { 34. } else { 18. }),
+            ),
+            colors.text,
             window,
             cx,
         );
         if x == 2 {
-            let zero =
-                bounds.left() + bounds.size.width * model::hue_position(0., p.hue_origin) as f32;
             line(
-                point(zero, bounds.top()),
-                point(zero, bounds.bottom()),
+                point(zero_x, bounds.top()),
+                point(zero_x, bounds.bottom()),
                 1.,
-                0x344151,
+                colors.guide,
                 window,
             );
             label(
                 "0°".into(),
-                point(zero + px(4.), bounds.top() + px(2.)),
-                0xc6b3e8,
+                point(
+                    (zero_x + px(4.)).min(bounds.right() - px(24.)),
+                    bounds.top() + px(18.),
+                ),
+                colors.channels[2],
                 window,
                 cx,
             );
         }
     } else if p.polar {
-        let axis_color = 0xaacfe5;
+        let axis_color = colors.channels[0];
         if let (Some(a), Some(b)) = (
             project(Oklch::new(0., 0., 0.)),
             project(Oklch::new(1., 0., 0.)),
@@ -1366,11 +1605,17 @@ fn paint_plot(
             label(
                 "L=1 · white".into(),
                 point(b.x + px(7.), b.y - px(15.)),
-                TEXT,
+                colors.text,
                 window,
                 cx,
             );
-            label("L=0".into(), point(a.x + px(7.), a.y), MUTED, window, cx);
+            label(
+                "L=0".into(),
+                point(a.x + px(7.), a.y),
+                colors.muted,
+                window,
+                cx,
+            );
         }
         for i in 0..96 {
             let h = i as f64 * 360. / 96.;
@@ -1378,7 +1623,7 @@ fn paint_plot(
                 project(Oklch::new(0., 0.4, h)),
                 project(Oklch::new(0., 0.4, h + 360. / 96.)),
             ) {
-                line(a, b, 1., BORDER, window);
+                line(a, b, 1., colors.border, window);
             }
         }
         for h in [0., 90., 180., 270.] {
@@ -1386,10 +1631,10 @@ fn paint_plot(
                 project(Oklch::new(0., 0., h)),
                 project(Oklch::new(0., 0.4, h)),
             ) {
-                line(a, b, 1., BORDER, window);
-                label(format!("{h:.0}°"), b, MUTED, window, cx);
+                line(a, b, 1., colors.border, window);
+                label(format!("{h:.0}°"), b, colors.muted, window, cx);
                 if h == 0. {
-                    circle(b, 4., rgb(0xc6b3e8).into(), None, window);
+                    circle(b, 4., rgb(colors.channels[2]).into(), None, window);
                 }
             }
         }
@@ -1399,12 +1644,12 @@ fn paint_plot(
             (
                 Oklch::new(0., 0., p.hue_origin),
                 Oklch::new(1., 0., p.hue_origin),
-                0xaacfe5,
+                colors.channels[0],
             ),
             (
                 Oklch::new(0., 0., p.hue_origin),
                 Oklch::new(0., 0.4, p.hue_origin),
-                0xe4c27e,
+                colors.channels[1],
             ),
         ] {
             if let (Some(a), Some(b)) = (project(a), project(b)) {
@@ -1423,23 +1668,23 @@ fn paint_plot(
                 project_world(glam::Vec3::new(-0.9, -0.3, l * 1.3 - 0.65)),
                 project_world(glam::Vec3::new(0.9, -0.3, l * 1.3 - 0.65)),
                 1.,
-                BORDER,
+                colors.border,
                 window,
             );
         }
         for (v, s, col) in [
-            (glam::Vec3::new(0.92, -0.3, -0.65), "H", 0xc6b3e8),
-            (glam::Vec3::new(-0.9, -0.3, 0.70), "L", 0xaacfe5),
-            (glam::Vec3::new(-0.9, 0.92, -0.65), "C", 0xe4c27e),
+            (glam::Vec3::new(0.92, -0.3, -0.65), "H", colors.channels[2]),
+            (glam::Vec3::new(-0.9, -0.3, 0.70), "L", colors.channels[0]),
+            (glam::Vec3::new(-0.9, 0.92, -0.65), "C", colors.channels[1]),
         ] {
             label(s.into(), project_world(v), col, window, cx);
         }
         if let Some(zero) = project(Oklch::new(0., 0., 0.)) {
-            circle(zero, 4., rgb(0xc6b3e8).into(), None, window);
+            circle(zero, 4., rgb(colors.channels[2]).into(), None, window);
             label(
                 "0°".into(),
                 point(zero.x + px(6.), zero.y),
-                0xc6b3e8,
+                colors.channels[2],
                 window,
                 cx,
             );
@@ -1468,7 +1713,7 @@ fn paint_plot(
                 Hsla::from(color_value(*col)).alpha((0.85 / (1. + d * 12.)) as f32),
                 Some((
                     1.,
-                    Hsla::from(rgb(0xffffff)).alpha((0.7 / (1. + d * 8.)) as f32),
+                    Hsla::from(rgb(colors.curve)).alpha((0.7 / (1. + d * 8.)) as f32),
                 )),
                 window,
             );
@@ -1515,8 +1760,15 @@ fn paint_plot(
     flush(&mut points, last_outside, &mut strokes);
     for (outside, points) in strokes {
         for (width, color) in [
-            (4.6, 0x10151c),
-            (2., if outside { WARNING } else { 0xf3f7fc }),
+            (4.6, colors.curve_outline),
+            (
+                2.,
+                if outside {
+                    colors.warning
+                } else {
+                    colors.curve
+                },
+            ),
         ] {
             let mut path = PathBuilder::stroke(px(width));
             path.move_to(points[0]);
@@ -1551,7 +1803,7 @@ fn paint_plot(
                     screen([x, t]),
                     screen([x, (t + 5. / height as f64).min(1.)]),
                     1.,
-                    0x77998b,
+                    colors.accent,
                     window,
                 );
             }
@@ -1572,16 +1824,16 @@ fn paint_plot(
                         }
                         if let Some(handle) = node.handle_position(side) {
                             let pos = screen(handle);
-                            line(screen(node.position), pos, 1.2, ACCENT, window);
+                            line(screen(node.position), pos, 1.2, colors.accent, window);
                             let mut square = fill(
                                 Bounds::new(
                                     point(pos.x - px(4.), pos.y - px(4.)),
                                     size(px(8.), px(8.)),
                                 ),
-                                rgb(ACCENT),
+                                rgb(colors.accent),
                             );
                             square.border_widths = Edges::all(px(1.));
-                            square.border_color = rgb(0x102018).into();
+                            square.border_color = rgb(colors.surface).into();
                             window.paint_quad(square);
                         }
                     }
@@ -1596,12 +1848,12 @@ fn paint_plot(
                     pos,
                     7.,
                     rgb(if selected == Some(i) {
-                        ACCENT
+                        colors.accent
                     } else {
-                        0x0f171d
+                        colors.surface
                     })
                     .into(),
-                    Some((2., rgb(ACCENT).into())),
+                    Some((2., rgb(colors.accent).into())),
                     window,
                 );
                 // Keep endpoint labels inside the viewport.
@@ -1610,7 +1862,7 @@ fn paint_plot(
                 label(
                     (i + 1).to_string(),
                     point(pos.x + px(dx), pos.y + px(dy)),
-                    ACCENT,
+                    colors.accent,
                     window,
                     cx,
                 );
@@ -1622,20 +1874,20 @@ fn paint_plot(
             continue;
         }
         let intersections = curve.intersections(slice, p.slices[slice.axes().2]);
-        let colors = [0xc6b3e8, 0xaacfe5, 0xe4c27e];
+        let intersections_colors = [colors.channels[2], colors.channels[0], colors.channels[1]];
         for s in intersections.points.iter().take(32) {
             if let Some(pos) = project(s.color) {
                 circle(
                     pos,
                     5.,
-                    rgb(colors[i]).into(),
-                    Some((1.5, rgb(0x0a0d11).into())),
+                    rgb(intersections_colors[i]).into(),
+                    Some((1.5, rgb(colors.surface).into())),
                     window,
                 );
                 label(
                     format!("{}={:.3}", p.parameter, s.t),
                     point(pos.x + px(8.), pos.y + px(5.)),
-                    colors[i],
+                    intersections_colors[i],
                     window,
                     cx,
                 );
@@ -1646,8 +1898,8 @@ fn paint_plot(
         circle(
             pos,
             5.,
-            rgb(0xffffff).into(),
-            Some((2., rgb(0x172330).into())),
+            rgb(colors.curve).into(),
+            Some((2., rgb(colors.curve_outline).into())),
             window,
         );
     }
@@ -1694,24 +1946,29 @@ impl Studio {
             .child(
                 DockLayout::h_split()
                     .child(tabs(1), None)
-                    .child(tabs(2), None),
+                    .child(tabs(2), None)
+                    .child(tabs(4), None),
                 None,
             )
             .child(
                 DockLayout::h_split()
-                    .child(tabs(3), None)
-                    .child(tabs(4), None),
+                    .child(tabs(5), None)
+                    .child(tabs(3), None),
                 None,
             );
         let left = tabs(0);
-        let bottom = tabs(5);
         let right = tabs(6);
         self.dock.update(cx, |area, cx| {
+            for placement in [
+                DockPlacement::Left,
+                DockPlacement::Right,
+                DockPlacement::Bottom,
+            ] {
+                area.remove_dock(placement, window, cx);
+            }
             area.set_center(center, window, cx);
             area.set_dock(DockPlacement::Left, left, window, cx);
             area.set_dock_size(DockPlacement::Left, px(310.), window, cx);
-            area.set_dock(DockPlacement::Bottom, bottom, window, cx);
-            area.set_dock_size(DockPlacement::Bottom, px(184.), window, cx);
             area.set_dock(DockPlacement::Right, right, window, cx);
             area.set_dock_size(DockPlacement::Right, px(292.), window, cx);
             if area.is_dock_open(DockPlacement::Right) {
@@ -1781,6 +2038,7 @@ impl Studio {
 }
 impl Render for Studio {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = palette(cx);
         let m = self.model.read(cx);
         let outside = m
             .curve
@@ -1791,8 +2049,8 @@ impl Render for Studio {
         column()
             .size_full()
             .gap_0()
-            .bg(rgb(BG))
-            .text_color(rgb(TEXT))
+            .bg(rgb(colors.background))
+            .text_color(rgb(colors.text))
             .text_sm()
             .child(
                 row()
@@ -1800,7 +2058,7 @@ impl Render for Studio {
                     .px_5()
                     .gap_4()
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(colors.border))
                     .child(
                         row().gap_1().children(
                             [0xabc4b2, 0x60a391, 0x386557, 0x244038]
@@ -1816,12 +2074,38 @@ impl Render for Studio {
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(MUTED))
+                                    .text_color(rgb(colors.muted))
                                     .child("COLORMAP STUDIO"),
                             ),
                     )
-                    .child(div().w(px(1.)).h_8().bg(rgb(BORDER)))
-                    .child(caption(m.project.name.clone()).flex_1())
+                    .child(div().w(px(1.)).h_8().bg(rgb(colors.border)))
+                    .child(
+                        caption(m.project.name.clone(), cx)
+                            .flex_1()
+                            .min_w_0()
+                            .truncate(),
+                    )
+                    .child(
+                        Button::new("toggle-theme")
+                            .label(if cx.theme().is_dark() {
+                                "Light theme"
+                            } else {
+                                "Dark theme"
+                            })
+                            .tooltip(
+                                "Switch the app UI and plot backgrounds between light and dark",
+                            )
+                            .small()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                let mode = if cx.theme().is_dark() {
+                                    ThemeMode::Light
+                                } else {
+                                    ThemeMode::Dark
+                                };
+                                Theme::change(mode, Some(window), cx);
+                                this.model.update(cx, |_, cx| cx.notify());
+                            })),
+                    )
                     .child(
                         Button::new("open-project").label("Open…").small().on_click(
                             cx.listener(|this, _, window, cx| this.open_project(window, cx)),
@@ -1859,29 +2143,39 @@ impl Render for Studio {
                     .h(px(28.))
                     .px_4()
                     .border_t_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(colors.border))
                     .text_xs()
                     .child(
                         div()
                             .w(px(6.))
                             .h(px(6.))
                             .rounded_full()
-                            .bg(rgb(if m.error.is_some() { WARNING } else { ACCENT })),
+                            .bg(rgb(if m.error.is_some() {
+                                colors.warning
+                            } else {
+                                colors.accent
+                            })),
                     )
                     .child(
-                        caption(if m.error.is_some() {
-                            "Invalid expression · last valid path".into()
-                        } else {
-                            m.notice.clone()
-                        })
+                        caption(
+                            if m.error.is_some() {
+                                "Invalid expression · last valid path".into()
+                            } else {
+                                m.notice.clone()
+                            },
+                            cx,
+                        )
                         .flex_1()
                         .truncate(),
                     )
-                    .child(caption(format!(
-                        "{CURVE_SAMPLES} path samples · {:.1}% outside sRGB",
-                        outside as f64 / 256. * 100.
-                    )))
-                    .child(caption(format!("WGPU · {}", m.gpu.adapter_name))),
+                    .child(caption(
+                        format!(
+                            "{CURVE_SAMPLES} path samples · {:.1}% outside sRGB",
+                            outside as f64 / 256. * 100.
+                        ),
+                        cx,
+                    ))
+                    .child(caption(format!("WGPU · {}", m.gpu.adapter_name), cx)),
             )
     }
 }

@@ -1,4 +1,4 @@
-struct Camera { mvp: mat4x4<f32>, view:vec4<f32> }
+struct Camera { mvp: mat4x4<f32>, view:vec4<f32>, grid:vec4<f32> }
 @group(0) @binding(0) var<uniform> camera: Camera;
 struct Output { @builtin(position) position:vec4<f32>, @location(0) color:vec3<f32>, @location(1) coord:vec3<f32> }
 @vertex fn vs(@location(0) position:vec3<f32>, @location(1) color:vec3<f32>) -> Output {
@@ -31,6 +31,5 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) color:vec3<f
     // Suppress an unresolved grid at grazing angles rather than producing moiré.
     let fade=vec2(1.0)-smoothstep(vec2(0.25),vec2(0.75),footprint);
     let grid=max(coverage.x*fade.x,coverage.y*fade.y);
-    let grid_color=pow((vec3(0.82,0.89,0.94)+0.055)/1.055,vec3(2.4));
-    return vec4(mix(in.color,grid_color,grid*0.26),1.0);
+    return vec4(mix(in.color,camera.grid.rgb,grid*0.26),1.0);
 }

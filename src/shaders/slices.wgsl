@@ -1,5 +1,5 @@
 // Linear sRGB gamut test; display encoding occurs exactly once, below.
-struct Params { size_plane: vec4<f32>, slice: vec4<f32> }
+struct Params { size_plane: vec4<f32>, slice: vec4<f32>, background:vec4<f32>, checker:vec4<f32>, grid:vec4<f32> }
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var output: texture_storage_2d<rgba8unorm, write>;
 fn linear_rgb(lch: vec3<f32>) -> vec3<f32> {
@@ -31,7 +31,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x>=u32(p.size_plane.x) || id.y>=u32(p.size_plane.y) { return; }
     let uv = (vec2<f32>(id.xy)+0.5)/p.size_plane.xy;
     let tile = f32((id.x/8u + id.y/8u)%2u);
-    let background = decode(mix(vec3(0.085,0.098,0.12),vec3(0.102,0.116,0.14),tile));
+    let background = decode(mix(p.background.rgb,p.checker.rgb,tile));
     // Compute shaders have no rasterizer/MSAA coverage. Integrate a regular
     // 4x4 subpixel pattern to smooth the gamut silhouette without blurring the
     // color field or changing the pointwise gamut test. Average in linear light.
@@ -50,6 +50,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let gx = abs(fract(uv.x*4.0+0.5)-0.5)*p.size_plane.x/4.0;
     let gy = abs(fract(uv.y*4.0+0.5)-0.5)*p.size_plane.y/4.0;
     let grid = clamp(0.95-min(gx,gy),0.0,1.0);
-    color = mix(color,decode(vec3(0.68,0.74,0.8)),grid*0.15);
+    color = mix(color,decode(p.grid.rgb),grid*0.15);
     textureStore(output,vec2<i32>(id.xy),vec4(encode(color),1.0));
 }

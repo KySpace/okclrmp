@@ -1,3 +1,4 @@
+pub mod appearance;
 pub mod color;
 pub mod exchange;
 pub mod expr;
