@@ -1,6 +1,8 @@
 use super::*;
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
-use okclrmp::constants::{Constant, ConstantKind, display_value, limit_precision, step_number};
+use okclrmp::constants::{
+    Constant, ConstantKind, display_value, limit_precision, step_number_with_binding,
+};
 
 struct LabelDrag {
     origin: Pixels,
@@ -14,6 +16,7 @@ pub(super) struct ConstantEditor {
     name: Entity<InputState>,
     value: Entity<InputState>,
     kind: ConstantKind,
+    binding: Option<SliderBinding>,
     renaming: bool,
     original_name: String,
     drag: Option<LabelDrag>,
@@ -31,10 +34,10 @@ impl ConstantEditor {
         let name = cx.new(|cx| InputState::new(window, cx).default_value(constant.name.clone()));
         let value =
             cx.new(|cx| InputState::new(window, cx).default_value(display_value(constant.value)));
-        let subscriptions = vec![
+        let mut subscriptions = vec![
             cx.subscribe_in(&name, window, |this, _, event, window, cx| {
                 match event {
-                    InputEvent::Change => this.publish(cx),
+                    InputEvent::Change => this.publish(window, cx),
                     InputEvent::Blur => this.renaming = false,
                     InputEvent::PressEnter { .. } => {
                         this.renaming = false;
@@ -47,7 +50,7 @@ impl ConstantEditor {
             cx.subscribe_in(&value, window, |this, _, event, window, cx| match event {
                 InputEvent::Change => {
                     this.limit_precision(window, cx);
-                    this.publish(cx);
+                    this.publish(window, cx);
                 }
                 InputEvent::Blur | InputEvent::PressEnter { .. } => {
                     this.scroll = 0.;
@@ -56,11 +59,15 @@ impl ConstantEditor {
                 _ => {}
             }),
         ];
+        if let Some(model) = owner.upgrade() {
+            subscriptions.push(cx.observe(&model, |_, _, cx| cx.notify()));
+        }
         Self {
             owner,
             name,
             value,
             kind: constant.kind,
+            binding: constant.binding,
             renaming,
             original_name: constant.name.clone(),
             drag: None,
@@ -74,6 +81,47 @@ impl ConstantEditor {
             s.set_selected_range(0..s.value().len(), cx);
         });
     }
+    pub(super) fn sync_value(&mut self, value: f64, window: &mut Window, cx: &mut Context<Self>) {
+        self.drag = None;
+        self.scroll = 0.;
+        self.value
+            .update(cx, |s, cx| s.set_value(display_value(value), window, cx));
+        cx.notify();
+    }
+    fn choose_binding(
+        &mut self,
+        binding: Option<SliderBinding>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.snapshot(cx).is_err() {
+            self.publish(window, cx);
+            return;
+        }
+        self.commit_value(window, cx);
+        let id = cx.entity().entity_id();
+        if let Some(owner) = self.owner.upgrade() {
+            let constant = owner.update(cx, |m, cx| {
+                let index = m.constants.iter().position(|r| r.entity_id() == id)?;
+                match m.project.bind_constant(index, binding) {
+                    Ok(()) => {
+                        m.sync_slider_states(window, cx);
+                        m.rebuild(cx);
+                        Some(m.project.constants[index].clone())
+                    }
+                    Err(error) => {
+                        m.notice = error;
+                        cx.notify();
+                        None
+                    }
+                }
+            });
+            if let Some(constant) = constant {
+                self.binding = constant.binding;
+                self.sync_value(constant.value, window, cx);
+            }
+        }
+    }
     fn snapshot(&self, cx: &App) -> Result<Constant, String> {
         let name = self.name.read(cx).value().to_string();
         let value = self
@@ -85,23 +133,31 @@ impl ConstantEditor {
             .ok()
             .and_then(|v| self.kind.constrain(v))
             .ok_or_else(|| format!("Constant ‘{name}’ needs a finite number"))?;
-        Ok(Constant {
+        let mut constant = Constant {
             name,
             value,
             kind: self.kind,
-        })
+            binding: self.binding,
+        };
+        constant.value = constant.constrain(value).unwrap();
+        Ok(constant)
     }
-    fn publish(&self, cx: &mut Context<Self>) {
+    fn publish(&self, window: &mut Window, cx: &mut Context<Self>) {
         let result = self.snapshot(cx);
         let id = cx.entity().entity_id();
         if let Some(owner) = self.owner.upgrade() {
             owner.update(cx, |m, cx| {
                 if let Some(index) = m.constants.iter().position(|r| r.entity_id() == id) {
                     match result {
-                        Ok(constant) => {
-                            m.project.constants[index] = constant;
-                            m.constant_errors.remove(&id);
-                        }
+                        Ok(constant) => match m.project.update_constant(index, constant) {
+                            Ok(()) => {
+                                m.constant_errors.remove(&id);
+                                m.sync_slider_states(window, cx);
+                            }
+                            Err(error) => {
+                                m.constant_errors.insert(id, error);
+                            }
+                        },
                         Err(error) => {
                             m.constant_errors.insert(id, error);
                         }
@@ -122,7 +178,7 @@ impl ConstantEditor {
                 });
             }
         }
-        self.publish(cx);
+        self.publish(window, cx);
     }
     fn limit_precision(&self, window: &mut Window, cx: &mut Context<Self>) {
         let state = self.value.read(cx);
@@ -149,7 +205,9 @@ impl ConstantEditor {
         let mut text = state.value().to_string();
         let mut cursor = state.cursor();
         for _ in 0..count {
-            let Some(edit) = step_number(&text, cursor, self.kind, direction) else {
+            let Some(edit) =
+                step_number_with_binding(&text, cursor, self.kind, self.binding, direction)
+            else {
                 return false;
             };
             text = edit.text;
@@ -159,7 +217,7 @@ impl ConstantEditor {
             s.set_value(text, window, cx);
             s.set_selected_range(cursor..cursor, cx);
         });
-        self.publish(cx);
+        self.publish(window, cx);
         true
     }
     fn drag_to(&mut self, position: Pixels, window: &mut Window, cx: &mut Context<Self>) {
@@ -172,9 +230,10 @@ impl ConstantEditor {
         }
         drag.moved = true;
         if let Some(value) = self.kind.drag(drag.value, distance) {
+            let value = self.binding.map_or(value, |b| value.clamp(0., b.max()));
             self.value
                 .update(cx, |s, cx| s.set_value(display_value(value), window, cx));
-            self.publish(cx);
+            self.publish(window, cx);
         }
     }
 }
@@ -182,7 +241,16 @@ impl Render for ConstantEditor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = palette(cx);
         let weak = cx.entity().downgrade();
+        let binding_weak = weak.clone();
         let current_kind = self.kind;
+        let binding = self.binding;
+        let owners: [Option<String>; 3] = std::array::from_fn(|axis| {
+            let owner = self.owner.upgrade()?;
+            let model = owner.read(cx);
+            let index = model.project.bound_constant(axis)?;
+            (model.constants[index].entity_id() != cx.entity().entity_id())
+                .then(|| model.project.constants[index].name.clone())
+        });
         let label = if self.renaming {
             div()
                 .flex_1()
@@ -194,7 +262,7 @@ impl Render for ConstantEditor {
                         });
                         this.renaming = false;
                         this.value.update(cx, |s, cx| s.focus(window, cx));
-                        this.publish(cx);
+                        this.publish(window, cx);
                         cx.stop_propagation();
                         cx.notify();
                     }
@@ -273,7 +341,7 @@ impl Render for ConstantEditor {
                         let state = this.value.read(cx);
                         if !state.focus_handle(cx).is_focused(window)
                             || !state.selected_range().is_empty()
-                            || step_number(&state.value(), state.cursor(), this.kind, 1).is_none()
+                            || step_number_with_binding(&state.value(), state.cursor(), this.kind, this.binding, 1).is_none()
                         {
                             return;
                         }
@@ -309,6 +377,9 @@ impl Render for ConstantEditor {
                                     .on_click(move |_, window, cx| {
                                         let _ = weak.update(cx, |this, cx| {
                                             this.kind = kind;
+                                            if this.binding.is_some_and(|b| !kind.can_bind(b)) {
+                                                this.binding = None;
+                                            }
                                             this.commit_value(window, cx);
                                             cx.notify();
                                         });
@@ -317,6 +388,33 @@ impl Render for ConstantEditor {
                         }
                         menu
                     }),
+            )
+            .child(
+                tool_button("constant-binding", include_bytes!("../icons/link-slider.svg"),
+                    "Bind constant to slice slider",
+                    if let Some(binding) = binding {
+                        format!("Bound to {} · edits work in both directions and share the spline constant. Click to change or unlink", binding.name())
+                    } else if matches!(current_kind, ConstantKind::Integer | ConstantKind::Free) {
+                        "Choose Degree to bind H, or Fraction to bind L/C".into()
+                    } else {
+                        "Bind to a slice slider · Degree → H, Fraction → L/C. C uses 0–0.4 directly".into()
+                    })
+                    .selected(binding.is_some())
+                    .disabled(matches!(current_kind, ConstantKind::Integer | ConstantKind::Free))
+                    .dropdown_menu(move |mut menu, _, _| {
+                        let weak = binding_weak.clone();
+                        menu = menu.item(PopupMenuItem::new("Unbound").checked(binding.is_none())
+                            .on_click(move |_, window, cx| { let _ = weak.update(cx, |s, cx| s.choose_binding(None, window, cx)); }));
+                        for target in SliderBinding::ALL {
+                            let weak = binding_weak.clone();
+                            let owner = &owners[target.axis()];
+                            let label = owner.as_ref().map_or_else(|| target.label().to_string(), |name| format!("{} · used by {name}", target.name()));
+                            menu = menu.item(PopupMenuItem::new(label).checked(binding == Some(target))
+                                .disabled(!current_kind.can_bind(target) || owner.is_some())
+                                .on_click(move |_, window, cx| { let _ = weak.update(cx, |s, cx| s.choose_binding(Some(target), window, cx)); }));
+                        }
+                        menu
+                    })
             )
             .child(
                 Button::new("remove-constant")

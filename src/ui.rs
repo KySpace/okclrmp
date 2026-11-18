@@ -20,7 +20,7 @@ use std::{rc::Rc, sync::Arc, time::Duration};
 #[path = "ui/constant_editor.rs"]
 mod constant_editor;
 use constant_editor::ConstantEditor;
-use okclrmp::constants::{Constant, ConstantKind};
+use okclrmp::constants::{Constant, ConstantKind, SliderBinding};
 
 const PLOT_HELP_DELAY: Duration = Duration::from_secs(2);
 fn tool_button(
@@ -150,8 +150,10 @@ impl StudioModel {
             }),
         );
         for (i, slider) in sliders.iter().enumerate() {
-            subscriptions.push(
-                cx.subscribe(slider, move |this, _, event: &SliderEvent, cx| {
+            subscriptions.push(cx.subscribe_in(
+                slider,
+                window,
+                move |this, _, event: &SliderEvent, window, cx| {
                     if let SliderEvent::Change(value) = event {
                         if i < 3 {
                             // Programmatic slider synchronization must not round
@@ -159,7 +161,17 @@ impl StudioModel {
                             if this.project.slices[i] as f32 == value.start() {
                                 return;
                             }
-                            if this.project.set_slice(i, value.start() as f64) {
+                            let mut changed = this.project.set_slice(
+                                i,
+                                (value.start() as f64).clamp(0., [1., model::C_MAX, 360.][i]),
+                            );
+                            if let Some(index) = this.project.bound_constant(i) {
+                                let row = &this.constants[index];
+                                let constant = &this.project.constants[index];
+                                changed |= this.constant_errors.remove(&row.entity_id()).is_some();
+                                row.update(cx, |s, cx| s.sync_value(constant.value, window, cx));
+                            }
+                            if changed {
                                 this.rebuild(cx);
                                 return;
                             }
@@ -168,8 +180,8 @@ impl StudioModel {
                         }
                         cx.notify();
                     }
-                }),
-            );
+                },
+            ));
         }
         Self {
             project,
@@ -216,6 +228,7 @@ impl StudioModel {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         p.migrate_spline()?;
+        p.sync_bound_slices()?;
         let curve = p.compile()?;
         self.project = p;
         self.curve = curve;
@@ -268,6 +281,7 @@ impl StudioModel {
             name,
             value: 0.,
             kind: ConstantKind::Free,
+            binding: None,
         };
         let owner = cx.entity().downgrade();
         let row = cx.new(|cx| ConstantEditor::new(&constant, owner, true, window, cx));
@@ -277,18 +291,16 @@ impl StudioModel {
         self.rebuild(cx);
     }
     fn sync_slices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let c = self.curve.at(self.project.cursor);
-        let mut slices = [c.l.clamp(0., 1.), c.c.clamp(0., 0.4), c.h.rem_euclid(360.)];
-        if let Some(axis) = self.project.constant_axis() {
-            slices[axis] = self.project.slices[axis];
-        }
-        self.project.slices = slices;
+        self.project.follow_slices(&self.curve);
+        self.sync_slider_states(window, cx);
+        cx.notify();
+    }
+    fn sync_slider_states(&self, window: &mut Window, cx: &mut Context<Self>) {
         for i in 0..3 {
             self.sliders[i].update(cx, |s, cx| {
                 s.set_value(self.project.slices[i] as f32, window, cx)
             });
         }
-        cx.notify();
     }
 }
 
@@ -1200,6 +1212,16 @@ impl StudioPanel {
         let mut bottom = column().gap_1();
         if let Some(plane) = plane {
             let (_, _, axis) = plane.axes();
+            let bound = p.bound_constant(axis).map(|i| &p.constants[i]);
+            let spline_constant = p.constant_axis() == Some(axis);
+            let mut slider_label = format!("{} slice", model::axis_name(axis));
+            if let Some(constant) = bound {
+                slider_label.push_str(&format!("; linked to constant ‘{}’", constant.name));
+            }
+            if spline_constant {
+                slider_label.push_str("; also controls the spline's orthogonal constant");
+            }
+            let slider_tip = slider_label.clone();
             let intersections = m.curve.intersections(plane, p.slices[axis]);
             let text = if intersections.coplanar {
                 "Entire curve lies in this slice".into()
@@ -1217,43 +1239,40 @@ impl StudioPanel {
                         .join(" · ")
                 )
             };
-            bottom = bottom
-                .child(
-                    row()
-                        .h(px(24.))
-                        .child(div().flex_1().min_w_0().child(
-                            Slider::new(&m.sliders[axis]).accessibility_label(format!(
-                                "{} slice{}",
-                                model::axis_name(axis),
-                                if p.constant_axis() == Some(axis) {
-                                    " and colormap constant"
+            bottom =
+                bottom
+                    .child(
+                        row()
+                            .h(px(24.))
+                            .child(div().flex_1().min_w_0().child(
+                                Slider::new(&m.sliders[axis]).accessibility_label(slider_label),
+                            ))
+                            .child(
+                                caption(
+                                    format!(
+                                        "{} {:.2}{}",
+                                        model::axis_name(axis),
+                                        p.slices[axis],
+                                        if axis == 2 { "°" } else { "" }
+                                    ),
+                                    cx,
+                                )
+                                .w(px(88.))
+                                .flex_shrink_0()
+                                .font_family("Consolas")
+                                .text_color(rgb(if spline_constant || bound.is_some() {
+                                    colors.accent
                                 } else {
-                                    ""
-                                }
-                            )),
-                        ))
-                        .child(
-                            caption(
-                                format!(
-                                    "{} {:.3}{}",
-                                    model::axis_name(axis),
-                                    p.slices[axis],
-                                    if axis == 2 { "°" } else { "" }
-                                ),
-                                cx,
-                            )
-                            .w(px(88.))
-                            .flex_shrink_0()
-                            .font_family("Consolas")
-                            .text_color(rgb(if p.constant_axis() == Some(axis) {
-                                colors.accent
-                            } else {
-                                colors.muted
-                            }))
-                            .text_right(),
-                        ),
-                )
-                .child(caption(text, cx).truncate());
+                                    colors.muted
+                                }))
+                                .text_right()
+                                .id(("slice-readout", axis))
+                                .tooltip(move |window, cx| {
+                                    Tooltip::new(slider_tip.clone()).build(window, cx)
+                                }),
+                            ),
+                    )
+                    .child(caption(text, cx).truncate());
         }
         let content = column()
             .size_full()

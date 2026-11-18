@@ -45,6 +45,10 @@ One chosen parameter ranges over `[0, 1]`. Hue uses degrees. Functions without a
 
 Constant value fields show at most two digits after the decimal point. Dragging, stepping, and typed/pasted numbers follow the same limit; trailing zeroes are optional.
 
+Each constant's slider-link icon opens its binding menu: **Degree → H**, **Fraction → L or C**, or **Unbound**. One named constant can own each slider. Binding initially moves the slice to the constant's value; numeric edits and slider movement then update each other. C uses actual chroma in `[0, 0.4]`, so binding to C clamps a larger fraction to 0.4; L uses `[0, 1]`. Changing to an incompatible type removes the link. Bindings are saved in the project, and older projects start unbound.
+
+Named links share the same slice value as the existing spline orthogonal-constant mode. Both can be active together; unlinking the named constant leaves the spline mode active. **Move slices to this color** preserves both kinds of bound axes to avoid feeding curve samples back into their inputs. At the hue slider's 360° endpoint, a degree constant reads 0° while the slice retains its equivalent 360° endpoint.
+
 The separate **Variables** field accepts `name = expression` assignments separated by semicolons or newlines. Variables can use the parameter, constants, and earlier variables. Names must be distinct from the parameter, constants, builtins, and other variables. Forward references and cycles produce an error. Older project files with a combined constants string load as numeric rows, retaining their original values and curve samples.
 
 ```text

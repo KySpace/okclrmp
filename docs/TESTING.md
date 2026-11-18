@@ -6,7 +6,7 @@ Verified on Windows with Rust `1.101.0-nightly (249c1e4e3 2026-11-05)`, GPUI Kit
 
 | Check | Result |
 | --- | --- |
-| `cargo test --all-targets` | 45 core tests passed; 5 GPU tests are opt-in; binary test target built successfully |
+| `cargo test --all-targets` | 48 core tests passed; 5 GPU tests are opt-in; binary test target built successfully |
 | `cargo test --lib -- --ignored --nocapture` | All five hardware GPU tests passed on the RTX 4050 |
 | `cargo test -p accesskit_windows --lib unavailable_window_returns_uia_error_without_panicking` | 1 targeted teardown regression passed |
 | `cargo clippy --all-targets -- -D warnings` | Passed |
@@ -78,6 +78,12 @@ Six additional core tests cover the numeric operations used by the UI: drag rate
 The native row uses a horizontal resize cursor, a window-level drag listener while active, and a type menu. Double-click starts name editing; Enter moves focus to the numeric value and Escape restores the previous name. Numeric Up/Down handling captures keys before the text input's navigation actions. Wheel handling requires a focused, unselected numeric caret and accumulates fractional wheel deltas. Incomplete numeric text pauses export/save and retains the last valid curve; typed constraints normalize on Enter/blur. The separate definitions textarea shares the live rebuild path used by channel expressions.
 
 `target/debug/okclrmp-variables-preview.exe` builds from the current app sources. Native automation returned `Computer Use was not approved to use okclrmp-variables-preview`; no native gesture or layout pass is claimed. Manual review should cover dragging a label beyond the editor bounds, Up/Down/wheel at different caret positions, all four type choices, add/rename/remove, live variable changes, and switching presets/projects and themes. The earlier GPU checks above are unchanged; GPU rendering code was not modified for this feature.
+
+## Named constant slider bindings
+
+Three model regressions cover all Degree/H and Fraction/L/C links, constant-to-slice and slice-to-constant updates, curves that reference the constants, direct chroma units and the 0.4 cap, occupied-slider rejection, incompatible type changes, unlinking, project roundtrips, defaults for older files, load-time slice synchronization, cyclic H=0/360, and view-only cursor following. For each spline plane they also verify shared orthogonal values, coplanarity, unchanged handles, and continued spline slider operation after the named link is removed. The numeric stepping regression checks that a C-bound fraction stops at 0.40.
+
+Native sliders use the same model operations and synchronize the constant field without emitting another input change. Programmatic slider updates retain the existing f32 equality guard to preserve saved f64 values; user slider values clamp to the axis range before conversion reaches project validation. The link menu marks occupied axes, and slice readouts identify linked constants and the spline binding through their tooltip/accessibility label. Numeric readouts retain the two-decimal cap. A separate `target/debug/okclrmp-binding-preview.exe` supports manual review; the new menu and native gestures have been compiled but not exercised through desktop automation.
 
 A separate `target/debug/okclrmp-projection-preview.exe` provides a native build for manual interaction review. No new native mouse-gesture pass is claimed.
 

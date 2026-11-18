@@ -2,6 +2,44 @@
 use crate::expr;
 use serde::{Deserialize, Deserializer, Serialize};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SliderBinding {
+    Lightness,
+    Chroma,
+    Hue,
+}
+impl SliderBinding {
+    pub const ALL: [Self; 3] = [Self::Lightness, Self::Chroma, Self::Hue];
+    pub fn axis(self) -> usize {
+        match self {
+            Self::Lightness => 0,
+            Self::Chroma => 1,
+            Self::Hue => 2,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Lightness => "L",
+            Self::Chroma => "C",
+            Self::Hue => "H",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Lightness => "L · Lightness (0–1)",
+            Self::Chroma => "C · Chroma (0–0.4)",
+            Self::Hue => "H · Hue (0–360°)",
+        }
+    }
+    pub fn max(self) -> f64 {
+        match self {
+            Self::Lightness => 1.,
+            Self::Chroma => crate::model::C_MAX,
+            Self::Hue => 360.,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConstantKind {
     Degree,
@@ -12,6 +50,16 @@ pub enum ConstantKind {
 }
 impl ConstantKind {
     pub const ALL: [Self; 4] = [Self::Degree, Self::Fraction, Self::Integer, Self::Free];
+    pub fn can_bind(self, binding: SliderBinding) -> bool {
+        matches!(
+            (self, binding),
+            (Self::Degree, SliderBinding::Hue)
+                | (
+                    Self::Fraction,
+                    SliderBinding::Lightness | SliderBinding::Chroma
+                )
+        )
+    }
     pub fn name(self) -> &'static str {
         match self {
             Self::Degree => "Degree",
@@ -57,8 +105,15 @@ pub struct Constant {
     pub value: f64,
     #[serde(default)]
     pub kind: ConstantKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<SliderBinding>,
 }
 impl Constant {
+    pub fn constrain(&self, value: f64) -> Option<f64> {
+        self.kind
+            .constrain(value)
+            .map(|value| self.binding.map_or(value, |b| value.clamp(0., b.max())))
+    }
     pub fn from_legacy(source: &str, parameter: &str) -> Result<Vec<Self>, String> {
         let values = expr::constants(source, parameter)?;
         Ok(source
@@ -84,6 +139,7 @@ impl Constant {
                     name: name.into(),
                     value,
                     kind,
+                    binding: None,
                 })
             })
             .collect())
@@ -119,6 +175,15 @@ pub fn step_number(
     text: &str,
     cursor: usize,
     kind: ConstantKind,
+    direction: i32,
+) -> Option<NumberEdit> {
+    step_number_with_binding(text, cursor, kind, None, direction)
+}
+pub fn step_number_with_binding(
+    text: &str,
+    cursor: usize,
+    kind: ConstantKind,
+    binding: Option<SliderBinding>,
     direction: i32,
 ) -> Option<NumberEdit> {
     if !text.is_ascii() || text.len() > 128 || cursor > text.len() || !matches!(direction, -1 | 1) {
@@ -172,6 +237,7 @@ pub fn step_number(
         (value + direction as f64 * step, exponent)
     };
     let next = kind.constrain(next)?;
+    let next = binding.map_or(next, |b| next.clamp(0., b.max()));
     let scientific = exponent_at < text.len();
     let mut written = if scientific {
         let scaled = next / 10_f64.powi(written_exponent);
@@ -318,6 +384,30 @@ mod tests {
     }
     #[test]
     fn digit_steps_obey_types() {
+        assert_eq!(
+            step_number_with_binding(
+                "0.40",
+                4,
+                ConstantKind::Fraction,
+                Some(SliderBinding::Chroma),
+                1
+            )
+            .unwrap()
+            .text,
+            "0.40"
+        );
+        assert_eq!(
+            step_number_with_binding(
+                "0.39",
+                4,
+                ConstantKind::Fraction,
+                Some(SliderBinding::Chroma),
+                1
+            )
+            .unwrap()
+            .text,
+            "0.40"
+        );
         let edit = step_number("1e0", 3, ConstantKind::Fraction, 1).unwrap();
         assert_eq!(edit.text, "0.1e1");
         assert_eq!(edit.text.parse::<f64>().unwrap(), 1.);

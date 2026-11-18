@@ -1,6 +1,6 @@
 use crate::{
     color::Oklch,
-    constants::{Constant, deserialize_constants},
+    constants::{Constant, SliderBinding, deserialize_constants},
     expr::{self, Expr},
     spline::Spline,
 };
@@ -243,6 +243,7 @@ impl Project {
         Ok(())
     }
     pub fn compile(&self) -> Result<Curve, String> {
+        self.validate_bindings()?;
         if !self.cursor.is_finite()
             || self.slices.iter().any(|x| !x.is_finite())
             || !self.yaw.is_finite()
@@ -269,6 +270,15 @@ impl Project {
         }
         let mut constants = std::collections::BTreeMap::new();
         for constant in &self.constants {
+            if let Some(binding) = constant.binding
+                && constant.kind.constrain(self.slices[binding.axis()]) != Some(constant.value)
+            {
+                return Err(format!(
+                    "Constant ‘{}’ and its {} slider are out of sync",
+                    constant.name,
+                    binding.name()
+                ));
+            }
             if !expr::identifier(&constant.name)
                 || expr::reserved(&constant.name)
                 || constant.name == self.parameter
@@ -357,7 +367,131 @@ impl Project {
     pub fn set_slice(&mut self, axis: usize, value: f64) -> bool {
         let changed = self.slices[axis] != value;
         self.slices[axis] = value;
-        changed && self.constant_axis() == Some(axis)
+        let mut curve_changed = changed && self.constant_axis() == Some(axis);
+        for constant in &mut self.constants {
+            if constant.binding.is_some_and(|b| b.axis() == axis)
+                && let Some(next) = constant.constrain(value)
+                && constant.value != next
+            {
+                constant.value = next;
+                curve_changed = true;
+            }
+        }
+        curve_changed
+    }
+    pub fn bound_constant(&self, axis: usize) -> Option<usize> {
+        self.constants
+            .iter()
+            .position(|c| c.binding.is_some_and(|b| b.axis() == axis))
+    }
+    fn validate_bindings(&self) -> Result<(), String> {
+        let mut taken = [false; 3];
+        for constant in &self.constants {
+            if let Some(binding) = constant.binding {
+                let axis = binding.axis();
+                if !constant.kind.can_bind(binding) || taken[axis] {
+                    return Err(format!(
+                        "Invalid or duplicate {} slider binding for ‘{}’",
+                        binding.name(),
+                        constant.name
+                    ));
+                }
+                if constant.constrain(constant.value) != Some(constant.value) {
+                    return Err(format!(
+                        "Constant ‘{}’ is outside the {} slider range",
+                        constant.name,
+                        binding.name()
+                    ));
+                }
+                taken[axis] = true;
+            }
+        }
+        Ok(())
+    }
+    /// On load, named constants supply bound slices. Preserve H=360 when it
+    /// already agrees with the cyclic degree value zero.
+    pub fn sync_bound_slices(&mut self) -> Result<(), String> {
+        self.validate_bindings()?;
+        for constant in &self.constants {
+            if let Some(binding) = constant.binding {
+                let axis = binding.axis();
+                if constant.kind.constrain(self.slices[axis]) != Some(constant.value) {
+                    self.slices[axis] = constant.value;
+                }
+            }
+        }
+        Ok(())
+    }
+    pub fn bind_constant(
+        &mut self,
+        index: usize,
+        binding: Option<SliderBinding>,
+    ) -> Result<(), String> {
+        let constant = self.constants.get(index).ok_or("Unknown constant")?;
+        if let Some(binding) = binding {
+            if !constant.kind.can_bind(binding) {
+                return Err(format!(
+                    "{} constants cannot bind to {}",
+                    constant.kind.name(),
+                    binding.name()
+                ));
+            }
+            if self
+                .bound_constant(binding.axis())
+                .is_some_and(|i| i != index)
+            {
+                return Err(format!(
+                    "The {} slider is already bound to another constant",
+                    binding.name()
+                ));
+            }
+        }
+        let mut constant = constant.clone();
+        constant.binding = binding;
+        self.update_constant(index, constant)
+    }
+    /// Numeric edits and slider movement meet here, without evaluating or
+    /// following the curve back into its inputs.
+    pub fn update_constant(&mut self, index: usize, mut constant: Constant) -> Result<(), String> {
+        if index >= self.constants.len() {
+            return Err("Unknown constant".into());
+        }
+        if constant.binding.is_some_and(|b| !constant.kind.can_bind(b)) {
+            constant.binding = None;
+        }
+        if let Some(binding) = constant.binding
+            && self
+                .bound_constant(binding.axis())
+                .is_some_and(|i| i != index)
+        {
+            return Err(format!(
+                "The {} slider is already bound to another constant",
+                binding.name()
+            ));
+        }
+        constant.value = constant
+            .constrain(constant.value)
+            .ok_or("Constant must be finite")?;
+        if let Some(binding) = constant.binding {
+            self.slices[binding.axis()] = constant.value;
+        }
+        self.constants[index] = constant;
+        Ok(())
+    }
+    /// Following the cursor is view-only for bound axes, including the existing
+    /// spline orthogonal constant. This avoids a curve → input feedback loop.
+    pub fn follow_slices(&mut self, curve: &Curve) {
+        let c = curve.at(self.cursor);
+        let slices = [
+            c.l.clamp(0., 1.),
+            c.c.clamp(0., C_MAX),
+            c.h.rem_euclid(360.),
+        ];
+        for (axis, value) in slices.into_iter().enumerate() {
+            if self.constant_axis() != Some(axis) && self.bound_constant(axis).is_none() {
+                self.slices[axis] = value;
+            }
+        }
     }
     pub fn use_expressions(&mut self) {
         self.mode = Mode::Expressions;
@@ -566,6 +700,151 @@ pub fn connected(a: Oklch, b: Oklch) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn named_constants_and_sliders_update_in_both_directions() {
+        use crate::constants::ConstantKind;
+        for binding in SliderBinding::ALL {
+            let axis = binding.axis();
+            let mut p = Project::preset(1);
+            let index = [0, 2, 4][axis];
+            p.bind_constant(index, Some(binding)).unwrap();
+            assert_eq!(p.slices[axis], p.constants[index].value);
+            assert_eq!(p.bound_constant(axis), Some(index));
+            let before = p.constants.clone();
+            assert!(p.bind_constant(index + 1, Some(binding)).is_err());
+            assert_eq!(p.constants, before);
+            let slice_value = [0.61, 0.17, 359.99][axis];
+            assert!(p.set_slice(axis, slice_value));
+            assert_eq!(p.constants[index].value, slice_value);
+            assert_eq!(p.compile().unwrap().at(0.).channel(axis), slice_value);
+            let mut edited = p.constants[index].clone();
+            edited.value = [0.32, 0.09, 11.25][axis];
+            p.update_constant(index, edited.clone()).unwrap();
+            assert_eq!(p.slices[axis], edited.value);
+            assert_eq!(p.compile().unwrap().at(0.).channel(axis), edited.value);
+            let restored: Project =
+                serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+            assert_eq!(restored.constants, p.constants);
+            assert_eq!(restored.slices, p.slices);
+            assert_eq!(
+                restored.compile().unwrap().at(0.75),
+                p.compile().unwrap().at(0.75)
+            );
+            p.bind_constant(index, None).unwrap();
+            let before = p.compile().unwrap().at(0.25);
+            assert!(!p.set_slice(axis, slice_value));
+            assert_eq!(p.compile().unwrap().at(0.25), before);
+            p.bind_constant(index, Some(binding)).unwrap();
+            let mut changed_type = p.constants[index].clone();
+            changed_type.kind = ConstantKind::Integer;
+            p.update_constant(index, changed_type).unwrap();
+            assert_eq!(p.constants[index].binding, None);
+            assert!(p.bind_constant(index, Some(binding)).is_err());
+        }
+        let mut p = Project::preset(1);
+        // Binding uses actual chroma, without scaling [0, 1] into [0, 0.4].
+        p.bind_constant(1, Some(SliderBinding::Chroma)).unwrap();
+        assert_eq!(p.constants[1].value, C_MAX);
+        assert_eq!(p.slices[1], C_MAX);
+        let mut edited = p.constants[1].clone();
+        edited.value = 0.9;
+        p.update_constant(1, edited).unwrap();
+        assert_eq!(p.constants[1].value, C_MAX);
+        assert!(p.bind_constant(1, Some(SliderBinding::Hue)).is_err());
+        assert!(p.compile().is_ok());
+    }
+    #[test]
+    fn named_slider_binding_shares_the_spline_constant_without_changing_handles() {
+        for plane in Plane::ALL {
+            let mut p = Project::preset(1);
+            let (_, _, axis) = plane.axes();
+            let source = p.compile().unwrap();
+            p.enable_spline(plane, &source);
+            let spline = serde_json::to_value(&p.spline).unwrap();
+            p.spline_constant = true;
+            let index = [0, 2, 4][axis];
+            p.bind_constant(index, Some(SliderBinding::ALL[axis]))
+                .unwrap();
+            for value in [0., [0.73, 0.19, 287.25][axis], [1., C_MAX, 360.][axis]] {
+                p.set_slice(axis, value);
+                let curve = p.compile().unwrap();
+                assert!(
+                    curve
+                        .sample(21)
+                        .iter()
+                        .all(|s| s.color.channel(axis) == value)
+                );
+                assert!(curve.intersections(plane, value).coplanar);
+                assert_eq!(
+                    p.constants[index].value,
+                    if axis == 2 {
+                        value.rem_euclid(360.)
+                    } else {
+                        value
+                    }
+                );
+            }
+            let mut constant = p.constants[index].clone();
+            constant.value = [0.52, 0.21, 120.25][axis];
+            p.update_constant(index, constant.clone()).unwrap();
+            assert!(
+                p.compile()
+                    .unwrap()
+                    .sample(21)
+                    .iter()
+                    .all(|s| s.color.channel(axis) == constant.value)
+            );
+            assert_eq!(serde_json::to_value(&p.spline).unwrap(), spline);
+            // Removing the named link leaves the original spline binding active.
+            p.bind_constant(index, None).unwrap();
+            let old_constant = p.constants[index].value;
+            assert!(p.set_slice(axis, [0.44, 0.11, 90.][axis]));
+            assert_eq!(p.constants[index].value, old_constant);
+            assert_eq!(p.constant_axis(), Some(axis));
+            assert!(p.compile().is_ok());
+        }
+    }
+    #[test]
+    fn bindings_preserve_view_only_following_hue_endpoints_and_older_files() {
+        let mut p = Project::preset(1);
+        for binding in SliderBinding::ALL {
+            p.bind_constant([0, 2, 4][binding.axis()], Some(binding))
+                .unwrap();
+        }
+        p.cursor = 0.8;
+        let slices = p.slices;
+        let constants = p.constants.clone();
+        p.follow_slices(&p.compile().unwrap());
+        assert_eq!(p.slices, slices);
+        assert_eq!(p.constants, constants);
+        p.bind_constant(2, None).unwrap();
+        let c = p.compile().unwrap();
+        p.follow_slices(&c);
+        assert_eq!(p.slices[0], slices[0]);
+        assert_eq!(p.slices[2], slices[2]);
+        assert_eq!(p.slices[1], c.at(p.cursor).c);
+        p.set_slice(2, 360.);
+        assert_eq!(p.constants[4].value, 0.);
+        let mut restored: Project =
+            serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        restored.sync_bound_slices().unwrap();
+        assert_eq!(restored.slices[2], 360.);
+        assert_eq!(restored.constants[4].value, 0.);
+        restored.slices[0] = 0.99;
+        assert!(restored.compile().is_err());
+        restored.sync_bound_slices().unwrap();
+        assert_eq!(restored.slices[0], restored.constants[0].value);
+        assert!(restored.compile().is_ok());
+        restored.constants[1].binding = Some(SliderBinding::Lightness);
+        assert!(restored.compile().is_err());
+        let mut old = serde_json::to_value(Project::preset(1)).unwrap();
+        for constant in old["constants"].as_array_mut().unwrap() {
+            constant.as_object_mut().unwrap().remove("binding");
+        }
+        let old: Project = serde_json::from_value(old).unwrap();
+        assert!(old.constants.iter().all(|c| c.binding.is_none()));
+        assert!(old.compile().is_ok());
+    }
     #[test]
     fn typed_constants_and_derived_variables_update_and_roundtrip() {
         use crate::constants::ConstantKind;
