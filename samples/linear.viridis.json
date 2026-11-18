@@ -1,0 +1,61 @@
+{
+  "name": "Linear sweep",
+  "parameter": "t",
+  "constants": [
+    {
+      "name": "l_min",
+      "value": 0.2,
+      "kind": "Fraction"
+    },
+    {
+      "name": "l_max",
+      "value": 0.85,
+      "kind": "Fraction"
+    },
+    {
+      "name": "c_min",
+      "value": 0.02,
+      "kind": "Fraction"
+    },
+    {
+      "name": "c_max",
+      "value": 0.15,
+      "kind": "Fraction"
+    },
+    {
+      "name": "h_min",
+      "value": 340.0,
+      "kind": "Degree"
+    },
+    {
+      "name": "h_max",
+      "value": 100.0,
+      "kind": "Degree"
+    }
+  ],
+  "definitions": "",
+  "expressions": [
+    "l_min + (l_max-l_min)*t",
+    "c_min + (c_max-c_min)*t",
+    "h_min + (h_max-h_min)*t"
+  ],
+  "mode": "Expressions",
+  "spline_constant": false,
+  "imported": [],
+  "slices": [
+    0.2,
+    0.1850000023841858,
+    305.0
+  ],
+  "cursor": 0.0,
+  "sample_count": 256,
+  "map_chroma": true,
+  "reverse_output": false,
+  "yaw": -3.16378,
+  "pitch": 1.5707964,
+  "zoom": 1.0,
+  "hue_origin": 0.0,
+  "polar": true,
+  "show_slice_contours": true,
+  "orthographic": false
+}

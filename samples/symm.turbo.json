@@ -1,9 +1,21 @@
 {
   "name": "Turbo · spectral study",
   "parameter": "t",
-  "constants": "l_max=0.92; l_range=0.56",
+  "constants": [
+    {
+      "name": "l_max",
+      "value": 0.92,
+      "kind": "Fraction"
+    },
+    {
+      "name": "l_range",
+      "value": 0.56,
+      "kind": "Fraction"
+    }
+  ],
+  "definitions": "bias = 2 * abs(t - 0.5)",
   "expressions": [
-    "l_max-l_range*2*abs(t-0.5)",
+    "l_max - l_range*bias",
     "0.06 + 0.08*abs(sin(2*pi*t))",
     "300 - 280*t - 25*sin(2*pi*t)"
   ],
@@ -26,7 +38,7 @@
       },
       {
         "position": [
-          0.38043609343650236,
+          0.3804360934365024,
           0.18075024485588065
         ],
         "incoming": [
@@ -86,7 +98,7 @@
     {
       "l": 0.8935393238821369,
       "c": 0.20128031018860537,
-      "h": 121.37882725967529
+      "h": 121.37882725967528
     },
     {
       "l": 0.8273737580678987,
@@ -117,11 +129,12 @@
   "cursor": 0.4814453125,
   "sample_count": 256,
   "map_chroma": true,
-  "yaw": -1.4873337,
-  "pitch": -0.04520312,
-  "zoom": 1.0,
+  "reverse_output": false,
+  "yaw": -1.5691118,
+  "pitch": 0.0045747184,
+  "zoom": 1.6,
   "hue_origin": 352.0671564945951,
   "polar": false,
   "show_slice_contours": false,
-  "orthographic": false
+  "orthographic": true
 }

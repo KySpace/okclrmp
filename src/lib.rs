@@ -8,3 +8,4 @@ pub mod gpu;
 pub mod model;
 pub mod preview;
 pub mod spline;
+pub mod starting_points;

@@ -19,7 +19,8 @@ The second command executes both WGSL pipelines on the actual adapter, compares 
 
 ## Workflow
 
-- Choose **Monochrome**, **Linear sweep**, **Diverging**, or **Turbo study**.
+- Open the compact **Starting point** dropdown to choose a curve with a color-strip preview. The five hard-coded maps come from `samples/`: **Linear · Green**, **Linear · Viridis**, **Symmetric · Green / Magenta**, **Symmetric · Turbo**, and **Cyclic · Hue**. Only their colormap definitions are included; choosing one preserves your camera, reference overlays, sample count, and RGB mapping choice. New sessions start with Linear · Green.
+- Edit the description directly in the top toolbar. It updates the window title and is saved/restored with the project. Hover **Parameter**, **Variables**, **Curve definition**, or a channel label for expression guidance.
 - Use **Light theme** / **Dark theme** in the top toolbar to switch the current app session. Controls, docks, panels, plot backgrounds, axes, and editing overlays follow the theme. Colormap coordinates and exported colors stay unchanged.
 - Edit the parameter name, constants, reusable variables, and channel expressions. Updates are live. Invalid input retains the last valid plot and disables export/save until corrected.
 - Constants have individual name/value rows. Drag a name horizontally to tune its value; double-click the name to rename it. **+ Add** creates a constant, **×** removes it, and the type menu selects **Degree**, **Fraction**, **Integer**, or **Free**. With a caret in the numeric field and no text selected, Up/Down or the mouse wheel steps the digit immediately before the caret (skipping the decimal point). Written decimal precision and the selected place survive carries; scientific notation is supported. The wheel changes values only over the focused number field.

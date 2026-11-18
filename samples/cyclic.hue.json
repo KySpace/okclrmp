@@ -1,0 +1,95 @@
+{
+  "name": "Turbo · spectral study",
+  "parameter": "t",
+  "constants": [
+    {
+      "name": "c",
+      "value": 0.122,
+      "kind": "Fraction",
+      "binding": "Chroma"
+    },
+    {
+      "name": "l",
+      "value": 0.741,
+      "kind": "Fraction",
+      "binding": "Lightness"
+    },
+    {
+      "name": "hue_base",
+      "value": 238.1,
+      "kind": "Degree",
+      "binding": "Hue"
+    }
+  ],
+  "definitions": "",
+  "expressions": [
+    "l",
+    "c",
+    "t*360 + 45"
+  ],
+  "mode": "Expressions",
+  "spline": {
+    "nodes": [
+      {
+        "position": [
+          0.3959166666666667,
+          1.0
+        ],
+        "incoming": null,
+        "outgoing": [
+          0.0,
+          -0.1233333333333333
+        ],
+        "mode": "Corner"
+      },
+      {
+        "position": [
+          0.3959166666666667,
+          0.63
+        ],
+        "incoming": [
+          0.0,
+          0.1233333333333334
+        ],
+        "outgoing": [
+          0.0,
+          -0.1233333333333334
+        ],
+        "mode": "Smooth"
+      },
+      {
+        "position": [
+          0.3959166666666667,
+          0.26
+        ],
+        "incoming": [
+          0.0,
+          0.1233333333333333
+        ],
+        "outgoing": null,
+        "mode": "Corner"
+      }
+    ],
+    "knot": 0.5,
+    "linear": false,
+    "symmetric": false
+  },
+  "spline_constant": false,
+  "imported": [],
+  "slices": [
+    0.741,
+    0.122,
+    238.1
+  ],
+  "cursor": 0.8224673576510525,
+  "sample_count": 256,
+  "map_chroma": true,
+  "reverse_output": false,
+  "yaw": 5.8157754,
+  "pitch": 1.5707964,
+  "zoom": 1.0,
+  "hue_origin": 229.87949651665986,
+  "polar": true,
+  "show_slice_contours": false,
+  "orthographic": false
+}

@@ -6,7 +6,7 @@ Verified on Windows with Rust `1.101.0-nightly (249c1e4e3 2026-11-05)`, GPUI Kit
 
 | Check | Result |
 | --- | --- |
-| `cargo test --all-targets` | 51 core tests passed; 6 GPU/profile tests are opt-in; binary test target built successfully |
+| `cargo test --offline --all-targets` | 53 core tests passed; 6 GPU/profile tests are opt-in; binary test target built successfully |
 | `cargo test --lib -- --ignored --nocapture` | All five hardware GPU tests and the Windows CMYK profile test passed |
 | `cargo test -p accesskit_windows --lib unavailable_window_returns_uia_error_without_panicking` | 1 targeted teardown regression passed |
 | `cargo clippy --all-targets -- -D warnings` | Passed |
@@ -16,6 +16,12 @@ Verified on Windows with Rust `1.101.0-nightly (249c1e4e3 2026-11-05)`, GPUI Kit
 GPU validation checks 368 C–L, 512 C–H, and 555 L–H interior pixels against the Rust OKLCH → sRGB conversion (1,435 comparisons, ≤2 byte-level difference). Filtered graticule pixels and pixels whose footprint touches the gamut boundary are excluded from this pointwise check. The earlier perspective preview contains 7,989 distinctly colored surface pixels with 4× MSAA. Image size and alpha are also checked. Four images are written under `.research/gpu-check/`.
 
 Core tests cover conversion reference values and roundtrips, gamut boundaries, expression precedence/ternaries/constants/errors/builtins, cubic spline geometry and editing, legacy quadratic migration, spline channel ownership, slice intersections including jumps and tangencies, constant slice intervals, shortest-arc hue interpolation and 360° endpoints, saved project reproduction, import parsing, and output sample counts/endpoints/mapping policy.
+
+## Sample starting points and compact Curve studio
+
+The five built-in definitions are literal Rust data; the app does not load sample projects at runtime. A regression independently compiles the sample JSON fixtures and compares all three coordinates at 1,025 parameter positions for each map, including Turbo's active cubic spline and its hue-zero crossing. It also checks that built-ins omit saved reference points, slider bindings, inactive splines, and view state. Another regression verifies that choosing a starting point preserves the existing camera, reference overlays, sample count, and RGB mapping choice, and that an edited Unicode description survives a project roundtrip without changing the curve.
+
+The native picker groups maps by Linear, Symmetric, and Cyclic, with color strips on the button and menu entries. The description field in the top toolbar updates the native window title and the existing project `name` property. Parameter, variable, and expression guidance lives in label tooltips. The separate `target/debug/okclrmp-studio-preview.exe` is built for manual review of these controls; native interaction and tooltip placement have not been exercised by desktop automation for this change. Rendering code is unchanged, so the hardware results below are from previous checks.
 
 ## Cubic editing and cyclic hue
 

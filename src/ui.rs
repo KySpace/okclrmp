@@ -21,10 +21,14 @@ use std::{rc::Rc, sync::Arc, time::Duration};
 mod constant_editor;
 #[path = "ui/output.rs"]
 mod output;
+#[path = "ui/starting_point_picker.rs"]
+mod starting_point_picker;
 use constant_editor::ConstantEditor;
 use okclrmp::constants::{Constant, ConstantKind, SliderBinding};
+use okclrmp::starting_points::StartingPoint;
 
 const PLOT_HELP_DELAY: Duration = Duration::from_secs(2);
+const EXPRESSION_HELP: &str = "One parameter on [0, 1]; hue is in degrees.\n\nJulia-like scalar syntax:\n+, −, *, /, ^ · comparisons · && · ||\ncondition ? a : b\nabs, sin, cos, sind, cosd, sqrt, exp, log, min, max, clamp, mod, pi\nUse explicit * for multiplication. sin/cos use radians; sind/cosd use degrees.\n\nUse constants and reusable variables defined above the channel expressions.";
 fn tool_button(
     id: impl Into<ElementId>,
     svg: &[u8],
@@ -86,6 +90,7 @@ pub struct StudioModel {
     pub error: Option<String>,
     pub notice: String,
     pub gpu: Arc<Gpu>,
+    name: Entity<InputState>,
     parameter: Entity<InputState>,
     constants: Vec<Entity<ConstantEditor>>,
     constant_errors: std::collections::HashMap<EntityId, String>,
@@ -97,8 +102,14 @@ pub struct StudioModel {
 }
 impl StudioModel {
     pub fn new(gpu: Arc<Gpu>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let project = Project::default();
+        let project = StartingPoint::default().project();
         let curve = project.compile().unwrap();
+        let name = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(project.name.clone())
+                .placeholder("Colormap description")
+        });
+        window.set_window_title(&format!("{} — OKLCH Colormap Studio", project.name));
         let parameter =
             cx.new(|cx| InputState::new(window, cx).default_value(project.parameter.clone()));
         let constants = project
@@ -133,6 +144,20 @@ impl StudioModel {
                 .default_value("#440154\n#414487\n#2a788e\n#22a884\n#7ad151\n#fde725")
         });
         let mut subscriptions = vec![];
+        subscriptions.push(cx.subscribe_in(
+            &name,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.project.name = this.name.read(cx).value().to_string();
+                    window.set_window_title(&format!(
+                        "{} — OKLCH Colormap Studio",
+                        this.project.name
+                    ));
+                    cx.notify();
+                }
+            },
+        ));
         for input in [&parameter, &channels[0], &channels[1], &channels[2]] {
             subscriptions.push(cx.subscribe(input, |this, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -183,6 +208,7 @@ impl StudioModel {
             error: None,
             notice: "Ready".into(),
             gpu,
+            name,
             parameter,
             constants,
             constant_errors: std::collections::HashMap::new(),
@@ -227,6 +253,10 @@ impl StudioModel {
         self.project = p;
         self.curve = curve;
         self.error = None;
+        self.name.update(cx, |s, cx| {
+            s.set_value(self.project.name.clone(), window, cx)
+        });
+        window.set_window_title(&format!("{} — OKLCH Colormap Studio", self.project.name));
         self.parameter.update(cx, |s, cx| {
             s.set_value(self.project.parameter.clone(), window, cx)
         });
@@ -369,41 +399,16 @@ impl StudioPanel {
         let colors = palette(cx);
         let m = self.model.read(cx);
         let p = m.project.clone();
-        let mut content = column()
-            .p_4()
-            .gap_3()
-            .child(caption("DESIGN A PATH THROUGH COLOR", cx))
-            .child(
-                div()
-                    .text_lg()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(p.name.clone()),
-            )
-            .child(section("STARTING POINTS", cx));
-        for (i, name) in [
-            "01  Monochrome",
-            "02  Linear sweep",
-            "03  Diverging",
-            "04  Turbo study",
-        ]
-        .iter()
-        .enumerate()
-        {
-            content = content.child(
-                Button::new(("preset", i))
-                    .label(*name)
-                    .w_full()
-                    .small()
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.model.update(cx, |m, cx| {
-                            let _ = m.set_project(Project::preset(i), window, cx);
-                        });
-                    })),
-            );
-        }
+        let mut content = column().p_3().gap_2().child(self.starting_point_picker(cx));
         let expressions = matches!(p.mode, Mode::Expressions);
         content = content
-            .child(section("CURVE DEFINITION", cx))
+            .child(
+                section("CURVE DEFINITION", cx)
+                    .id("curve-definition-help")
+                    .tooltip(|window, cx| {
+                        Tooltip::new(EXPRESSION_HELP).max_w(px(380.)).build(window, cx)
+                    }),
+            )
             .child(
                 row()
                     .child(
@@ -411,6 +416,7 @@ impl StudioPanel {
                             .label("Expressions")
                             .small()
                             .selected(expressions)
+                            .tooltip("Define all three channels with expressions. Hover the channel labels for syntax help.")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.model.update(cx, |m, cx| {
                                     m.project.use_expressions();
@@ -428,13 +434,12 @@ impl StudioPanel {
                     )),
             )
             .child(
-                row().child(caption("Parameter", cx).w_24()).child(
-                    Input::new(&m.parameter)
-                        .small()
-                        .aria_label("Parameter name"),
-                ),
+                row()
+                    .child(caption("Parameter", cx).w_24().id("parameter-help")
+                        .tooltip(|window, cx| Tooltip::new("Choose one parameter name, such as t or u. It ranges over [0, 1]. Use this name in your expressions and variable definitions.")
+                            .max_w(px(380.)).build(window, cx)))
+                    .child(Input::new(&m.parameter).small().aria_label("Parameter name")),
             )
-            .child(caption("One parameter on [0, 1]. Hue is in degrees.", cx))
             .child(
                 row()
                     .justify_between()
@@ -454,17 +459,15 @@ impl StudioPanel {
             content = content.child(constant.clone());
         }
         content = content
-            .child(caption("Variables · name = expression", cx))
+            .child(caption("Variables", cx).id("variables-help")
+                .tooltip(|window, cx| Tooltip::new("Define reusable variables as name = expression, separated by semicolons or newlines. Use the parameter, constants, and earlier variables.\n\nExample: bias = 2 * abs(t - 0.5)")
+                    .max_w(px(380.)).build(window, cx)))
             .child(
                 Textarea::new(&m.definitions)
                     .small()
                     .font_family("Consolas")
                     .aria_label("Variable definitions"),
-            )
-            .child(caption(
-                "Use the parameter, constants, and earlier variables.",
-                cx,
-            ));
+            );
         for i in 0..3 {
             let constant = p.constant_axis() == Some(i);
             let locked = constant
@@ -482,7 +485,18 @@ impl StudioPanel {
                                 div()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(rgb(colors.channels[i]))
-                                    .child(format!("{}({})", model::axis_name(i), p.parameter)),
+                                    .child(format!("{}({})", model::axis_name(i), p.parameter))
+                                    .id(("channel-expression-help", i))
+                                    .tooltip(move |window, cx| {
+                                        let units = [
+                                            "Lightness L: normally 0–1.",
+                                            "Chroma C: normally 0–0.4.",
+                                            "Hue H: degrees; values may cross 0° or 360°.",
+                                        ][i];
+                                        Tooltip::new(format!("{units}\n\n{EXPRESSION_HELP}"))
+                                            .max_w(px(380.))
+                                            .build(window, cx)
+                                    }),
                             )
                             .when(locked, |r| {
                                 r.child(caption(
@@ -552,8 +566,6 @@ impl StudioPanel {
                 );
             }
         }
-        content=content.child(section("EXPRESSION NOTES", cx))
-            .child(caption("+, −, *, /, ^ · comparisons · && · ||\ncondition ? a : b\nabs, sin, cos, sind, sqrt, min, max, clamp, mod, pi\nUse explicit * for multiplication.", cx));
         div()
             .id("editor-scroll")
             .size_full()
@@ -2053,10 +2065,23 @@ impl Render for Studio {
                     )
                     .child(div().w(px(1.)).h_8().bg(rgb(colors.border)))
                     .child(
-                        caption(m.project.name.clone(), cx)
+                        div()
                             .flex_1()
                             .min_w_0()
-                            .truncate(),
+                            .id("project-description")
+                            .tooltip(|window, cx| {
+                                Tooltip::new(
+                                    "Edit the colormap description. Saved with the project.",
+                                )
+                                .build(window, cx)
+                            })
+                            .child(
+                                Input::new(&m.name)
+                                    .small()
+                                    .appearance(false)
+                                    .w_full()
+                                    .aria_label("Colormap description"),
+                            ),
                     )
                     .child(
                         Button::new("toggle-theme")

@@ -1,23 +1,36 @@
 {
   "name": "Diverging · ember / iris",
-  "parameter": "t",
-  "constants": "c_max=0.20",
+  "parameter": "u",
+  "constants": [
+    {
+      "name": "c_max",
+      "value": 0.2,
+      "kind": "Fraction"
+    },
+    {
+      "name": "l_min",
+      "value": 0.7,
+      "kind": "Fraction"
+    }
+  ],
+  "definitions": "bias = 2 * abs(u - 0.5)",
   "expressions": [
-    "1 - 0.30*2*abs(t - 0.5)",
-    "2*abs(t - 0.5)*c_max",
-    "t < 0.5 ? 142 : 327"
+    "1 - (1 - l_min)*bias",
+    "bias*c_max",
+    "u < 0.5 ? 142 : 327"
   ],
   "mode": "Expressions",
   "spline_constant": false,
   "imported": [],
   "slices": [
     0.7670000195503235,
-    0.09319999217987061,
+    0.0931999921798706,
     339.1000061035156
   ],
   "cursor": 0.2670000195503235,
   "sample_count": 256,
   "map_chroma": true,
+  "reverse_output": false,
   "yaw": 1.7713321,
   "pitch": 0.35666597,
   "zoom": 1.0,
