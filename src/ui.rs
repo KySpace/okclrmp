@@ -1460,50 +1460,6 @@ fn label(text: String, p: Point<Pixels>, color: u32, window: &mut Window, cx: &m
     );
     let _ = line.paint(p, px(15.), TextAlign::Left, None, window, cx);
 }
-fn outlined_label(text: String, p: Point<Pixels>, window: &mut Window, cx: &mut App) {
-    let (foreground, outline) = match appearance(cx) {
-        Appearance::Dark => (0xffffff, 0x000000),
-        Appearance::Light => (0x000000, 0xffffff),
-    };
-    let shape = |color| {
-        window.text_system().shape_line(
-            text.clone().into(),
-            px(11.),
-            &[TextRun {
-                len: text.len(),
-                font: font("Consolas"),
-                color: rgb(color).into(),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            }],
-            None,
-        )
-    };
-    let halo = shape(outline);
-    let fill = shape(foreground);
-    // A one-pixel glyph halo stays visible over every color in the bar.
-    for (dx, dy) in [
-        (-1., 0.),
-        (1., 0.),
-        (0., -1.),
-        (0., 1.),
-        (-0.707, -0.707),
-        (-0.707, 0.707),
-        (0.707, -0.707),
-        (0.707, 0.707),
-    ] {
-        let _ = halo.paint(
-            point(p.x + px(dx), p.y + px(dy)),
-            px(15.),
-            TextAlign::Left,
-            None,
-            window,
-            cx,
-        );
-    }
-    let _ = fill.paint(p, px(15.), TextAlign::Left, None, window, cx);
-}
 fn paint_plot(
     bounds: Bounds<Pixels>,
     plane: Option<Plane>,

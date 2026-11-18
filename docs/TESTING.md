@@ -49,7 +49,7 @@ Operation help uses a cancellable two-second timer that restarts on pointer move
 
 The light-theme GPU test additionally requires the grid's contrast to exceed the checker pattern's contrast at independently selected out-of-gamut pixels. This passes with the lighter checkerboard while all 1,435 interior color comparisons remain identical across themes. The updated slice capture was visually inspected. Native layout and icon interaction checks remain unverified; a separate layout preview is provided for manual review.
 
-Projection horizontal tick labels now sit at the top; the vertical C=0.40 and L=1.00 labels are omitted. Hue-zero labels sit one text row lower, with the dedicated marker clamped inside the right edge and coincident tick text suppressed. The output colorbar's parameter label uses theme-dependent black/white text with the opposite one-pixel glyph halo and no filled badge. These native drawing changes compile and pass the existing core checks; a separate label preview supports manual visual review.
+Projection horizontal tick labels now sit at the top; the vertical C=0.40 and L=1.00 labels are omitted. Hue-zero labels sit one text row lower, with the dedicated marker clamped inside the right edge and coincident tick text suppressed. The output colorbar now uses the single-color annotation experiment described below in place of the earlier black/white halo.
 
 ## Spline orthogonal constant binding
 
@@ -80,6 +80,8 @@ The native row uses a horizontal resize cursor, a window-level drag listener whi
 `target/debug/okclrmp-variables-preview.exe` builds from the current app sources. Native automation returned `Computer Use was not approved to use okclrmp-variables-preview`; no native gesture or layout pass is claimed. Manual review should cover dragging a label beyond the editor bounds, Up/Down/wheel at different caret positions, all four type choices, add/rename/remove, live variable changes, and switching presets/projects and themes. The earlier GPU checks above are unchanged; GPU rendering code was not modified for this feature.
 
 ## Output inspection and fallback previews
+
+Colorbar annotations convert the actual displayed, quantized sRGB background into OKLCH and apply `preview::annotation_ink`. The marker computes its ink once from the background beneath its line, and the parameter label reuses that exact color regardless of its placement. Endpoint labels sample their local backgrounds. Each is painted once with one color, without a halo, backplate, or second marker stroke. Sampling follows fallback conversion and output ordering. The earlier `.research/ink-preview/comparison.png` illustrates the previous position-based label rule; current native font rendering needs manual review.
 
 The light startup theme and orthographic preset defaults compile with the new output panel. The perspective camera regression explicitly selects perspective before comparing it with orthographic projection; all five hardware regressions pass with the changed project defaults.
 

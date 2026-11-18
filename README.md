@@ -49,6 +49,8 @@ Below the bar, click the color/HEX button to copy the inspected color as HEX. Th
 
 **Invert** reverses both the colorbar and exported sample order, and is saved with the project. The curve, its editable nodes, and the inspected source color stay unchanged; marker placement, scrubbing, keyboard movement, and endpoint labels follow the displayed direction. Older projects default to forward output.
 
+The inspection marker and its parameter label share one ink color computed from the displayed background directly beneath the marker. The editable ink mapping lives in `preview::annotation_ink`. Endpoint labels use their local backgrounds. This includes stepped, reversed, CMYK, and grayscale previews, with no outline or background fill.
+
 The **Fallback** dropdown offers original sRGB, CMYK, and grayscale previews. CMYK uses Windows color transforms through the installed `RSWOP.icm` print profile, using relative colorimetric intent. This preview represents that SWOP printing condition; another press or paper needs its own profile. Grayscale preserves linear-sRGB luminance. Fallbacks affect the preview only; copied/exported samples keep their selected original format and mapping policy. CMYK is disabled with an explanation if the required system profiles are unavailable. See [Windows color transforms](https://learn.microsoft.com/en-us/windows/win32/api/icm/nf-icm-translatecolors).
 
 ## Expression language

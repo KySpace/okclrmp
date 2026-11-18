@@ -2,6 +2,32 @@ use super::*;
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use okclrmp::preview::{self, CmykProof, Fallback, SamplingPreview};
 
+fn colorbar_ink_at(pixels: &[([u8; 3], bool)], bounds: Bounds<Pixels>, x: Pixels) -> u32 {
+    let fraction =
+        (f32::from(x - bounds.left()) / f32::from(bounds.size.width).max(1.)).clamp(0., 1.);
+    let index = ((fraction * pixels.len() as f32) as usize).min(pixels.len() - 1);
+    let background = Oklch::from_srgb(pixels[index].0.map(|v| v as f64 / 255.));
+    let [r, g, b, _] = preview::annotation_ink(background).rgba8(true);
+    ((r as u32) << 16) | ((g as u32) << 8) | b as u32
+}
+
+fn colorbar_label(text: String, p: Point<Pixels>, color: u32, window: &mut Window, cx: &mut App) {
+    let line = window.text_system().shape_line(
+        text.clone().into(),
+        px(11.),
+        &[TextRun {
+            len: text.len(),
+            font: font("Consolas"),
+            color: rgb(color).into(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }],
+        None,
+    );
+    let _ = line.paint(p, px(15.), TextAlign::Left, None, window, cx);
+}
+
 impl StudioPanel {
     fn set_parameter(&mut self, value: f64, cx: &mut Context<Self>) {
         if !value.is_finite() {
@@ -181,16 +207,15 @@ impl StudioPanel {
                     }
                 }
                 let x = bounds.left() + bounds.size.width * position as f32;
-                for (width, color) in [(4., colors.curve_outline), (2., colors.curve)] {
-                    line(
-                        point(x, bounds.top()),
-                        point(x, bounds.bottom()),
-                        width,
-                        color,
-                        window,
-                    );
-                }
-                outlined_label(
+                let marker_ink = colorbar_ink_at(&pixels, bounds, x);
+                line(
+                    point(x, bounds.top()),
+                    point(x, bounds.bottom()),
+                    2.,
+                    marker_ink,
+                    window,
+                );
+                colorbar_label(
                     format!("{param} = {cursor:.3}"),
                     point(
                         (x + px(5.)).clamp(
@@ -199,6 +224,7 @@ impl StudioPanel {
                         ),
                         bounds.top() + px(4.),
                     ),
+                    marker_ink,
                     window,
                     cx,
                 );
@@ -209,9 +235,10 @@ impl StudioPanel {
                         bounds.right() - px(26.),
                     ),
                 ] {
-                    outlined_label(
+                    colorbar_label(
                         label.into(),
                         point(x, bounds.bottom() - px(18.)),
+                        colorbar_ink_at(&pixels, bounds, x + px(9.9)),
                         window,
                         cx,
                     );
