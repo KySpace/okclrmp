@@ -21,7 +21,8 @@ The second command executes both WGSL pipelines on the actual adapter, compares 
 
 - Choose **Monochrome**, **Linear sweep**, **Diverging**, or **Turbo study**.
 - Use **Light theme** / **Dark theme** in the top toolbar to switch the current app session. Controls, docks, panels, plot backgrounds, axes, and editing overlays follow the theme. Colormap coordinates and exported colors stay unchanged.
-- Edit the parameter name, constants, and channel expressions. Updates are live. Invalid expressions retain the last valid plot and disable export until corrected.
+- Edit the parameter name, constants, reusable variables, and channel expressions. Updates are live. Invalid input retains the last valid plot and disables export/save until corrected.
+- Constants have individual name/value rows. Drag a name horizontally to tune its value; double-click the name to rename it. **+ Add** creates a constant, **×** removes it, and the type menu selects **Degree**, **Fraction**, **Integer**, or **Free**. With a caret in the numeric field and no text selected, Up/Down or the mouse wheel steps the digit immediately before the caret (skipping the decimal point). Written decimal precision and the selected place survive carries; scientific notation is supported. The wheel changes values only over the focused number field.
 - Click the pencil toggle at a projection's top right to edit its spline. That plane owns its two channels; the omitted channel remains expression driven by default. Other projections show a lock with an explanatory tooltip. Click the same pencil again to return to the saved L/C/H expressions. The expression fields retain their previous formulas.
 - While editing a spline, the constant toggle beside the pencil fixes the omitted channel at the current slice value: H for C–L, L for C–H, C for L–H. That plane's slider then changes both the slice and the colormap constant; its readout is highlighted. Other slice sliders remain view-only. Turn the toggle off to restore the saved expression. Constant mode and its value roundtrip with the project; leaving spline editing releases the binding.
 - Drag numbered circular nodes or square Bézier handles. The curve icon toggles cubic/line mode; the middle-anchor icon toggles two/three nodes; the mirror icon toggles symmetric editing. Adding the middle node preserves the curve's shape, and removing it preserves endpoint tangents. Line mode uses two anchors without handles. The four middle-node mode icons reserve their toolbar space when hidden. Ctrl locks node movement to x/y or snaps a handle to x/y/its original direction.
@@ -40,14 +41,22 @@ Smooth joins adjust the middle parameter in proportion to the incoming/outgoing 
 
 ## Expression language
 
-One chosen parameter ranges over `[0, 1]`. Hue uses degrees. Functions without a `d` suffix use radians. Constants are scalar assignments separated by semicolons or newlines and may refer to earlier constants. They cannot refer to the parameter.
+One chosen parameter ranges over `[0, 1]`. Hue uses degrees. Functions without a `d` suffix use radians. Constants are named numeric rows, independent of the parameter. Degree values wrap into `[0, 360)`, fractions clamp to `[0, 1]`, integers round to whole numbers, and free values accept any finite number. Values normalize in the field on Enter or focus loss. Horizontal label dragging changes degrees by 0.5° per logical pixel, fractions by 0.002, integers by one per ten pixels, and free values by 0.01.
+
+Constant value fields show at most two digits after the decimal point. Dragging, stepping, and typed/pasted numbers follow the same limit; trailing zeroes are optional.
+
+The separate **Variables** field accepts `name = expression` assignments separated by semicolons or newlines. Variables can use the parameter, constants, and earlier variables. Names must be distinct from the parameter, constants, builtins, and other variables. Forward references and cycles produce an error. Older project files with a combined constants string load as numeric rows, retaining their original values and curve samples.
 
 ```text
 parameter: t
-constants: c_max=0.30; l_max=0.92; l_range=0.52
+constant row: c_max = 0.30  [Fraction]
 
-L: 1 - 0.36*2*abs(t - 0.5)
-C: abs(t - 0.5)*c_max
+variables:
+bias = 2 * abs(t - 0.5)
+lightness = 1 - 0.36*bias
+
+L: lightness
+C: bias*c_max/2
 H: t < 0.5 ? 15 : 263
 ```
 
@@ -95,6 +104,6 @@ On Windows the output's **Copy colors** action uses the live window as clipboard
 
 ## Source map
 
-`color.rs` — OKLCH/OKLab/sRGB conversions and gamut search. `expr.rs` — closed scalar parser. `model.rs` — parametric curves, cyclic views, intersections, presets, project state. `spline.rs` — cubic Bézier geometry, constraints, snapping, and drag state. `exchange.rs` — import/export. `gpu.rs`, `gamut_mesh.rs`, and `shaders/` — WGPU images and boundary geometry. `ui.rs` — native Kit components, editing, docking, and interaction.
+`color.rs` — OKLCH/OKLab/sRGB conversions and gamut search. `constants.rs` — typed numeric constraints, digit stepping, and legacy constant migration. `expr.rs` — closed scalar parser and reusable variables. `model.rs` — parametric curves, cyclic views, intersections, presets, project state. `spline.rs` — cubic Bézier geometry, constraints, snapping, and drag state. `exchange.rs` — import/export. `gpu.rs`, `gamut_mesh.rs`, and `shaders/` — WGPU images and boundary geometry. `ui.rs` and `ui/constant_editor.rs` — native Kit components, editing, docking, and interaction.
 
 Inspired by [OKLCH Color Picker & Converter](https://oklch.com/). Color conversion matrices follow the [original OKLab specification](https://bottosson.github.io/posts/oklab/).

@@ -17,6 +17,10 @@ use okclrmp::{
     spline::{self, Drag, NodeMode, Side, Spline},
 };
 use std::{rc::Rc, sync::Arc, time::Duration};
+#[path = "ui/constant_editor.rs"]
+mod constant_editor;
+use constant_editor::ConstantEditor;
+use okclrmp::constants::{Constant, ConstantKind};
 
 const PLOT_HELP_DELAY: Duration = Duration::from_secs(2);
 fn tool_button(
@@ -81,7 +85,9 @@ pub struct StudioModel {
     pub notice: String,
     pub gpu: Arc<Gpu>,
     parameter: Entity<InputState>,
-    constants: Entity<InputState>,
+    constants: Vec<Entity<ConstantEditor>>,
+    constant_errors: std::collections::HashMap<EntityId, String>,
+    definitions: Entity<TextareaState>,
     channels: [Entity<InputState>; 3],
     sliders: [Entity<SliderState>; 4],
     import_text: Entity<TextareaState>,
@@ -93,8 +99,20 @@ impl StudioModel {
         let curve = project.compile().unwrap();
         let parameter =
             cx.new(|cx| InputState::new(window, cx).default_value(project.parameter.clone()));
-        let constants =
-            cx.new(|cx| InputState::new(window, cx).default_value(project.constants.clone()));
+        let constants = project
+            .constants
+            .iter()
+            .map(|constant| {
+                let owner = cx.entity().downgrade();
+                cx.new(|cx| ConstantEditor::new(constant, owner, false, window, cx))
+            })
+            .collect();
+        let definitions = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .rows(3)
+                .placeholder("bias = 2 * abs(t - 0.5)")
+                .default_value(project.definitions.clone())
+        });
         let channels = std::array::from_fn(|i| {
             cx.new(|cx| InputState::new(window, cx).default_value(project.expressions[i].clone()))
         });
@@ -117,19 +135,20 @@ impl StudioModel {
                 .default_value("#440154\n#414487\n#2a788e\n#22a884\n#7ad151\n#fde725")
         });
         let mut subscriptions = vec![];
-        for input in [
-            &parameter,
-            &constants,
-            &channels[0],
-            &channels[1],
-            &channels[2],
-        ] {
+        for input in [&parameter, &channels[0], &channels[1], &channels[2]] {
             subscriptions.push(cx.subscribe(input, |this, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.read_inputs(cx);
                 }
             }));
         }
+        subscriptions.push(
+            cx.subscribe(&definitions, |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.read_inputs(cx);
+                }
+            }),
+        );
         for (i, slider) in sliders.iter().enumerate() {
             subscriptions.push(
                 cx.subscribe(slider, move |this, _, event: &SliderEvent, cx| {
@@ -160,6 +179,8 @@ impl StudioModel {
             gpu,
             parameter,
             constants,
+            constant_errors: std::collections::HashMap::new(),
+            definitions,
             channels,
             sliders,
             import_text,
@@ -168,12 +189,17 @@ impl StudioModel {
     }
     fn read_inputs(&mut self, cx: &mut Context<Self>) {
         self.project.parameter = self.parameter.read(cx).value().to_string();
-        self.project.constants = self.constants.read(cx).value().to_string();
+        self.project.definitions = self.definitions.read(cx).value().to_string();
         self.project.expressions =
             std::array::from_fn(|i| self.channels[i].read(cx).value().to_string());
         self.rebuild(cx);
     }
     fn rebuild(&mut self, cx: &mut Context<Self>) {
+        if let Some(error) = self.constant_errors.values().next() {
+            self.error = Some(error.clone());
+            cx.notify();
+            return;
+        }
         match self.project.compile() {
             Ok(curve) => {
                 self.curve = curve;
@@ -197,8 +223,18 @@ impl StudioModel {
         self.parameter.update(cx, |s, cx| {
             s.set_value(self.project.parameter.clone(), window, cx)
         });
-        self.constants.update(cx, |s, cx| {
-            s.set_value(self.project.constants.clone(), window, cx)
+        self.constants = self
+            .project
+            .constants
+            .iter()
+            .map(|constant| {
+                let owner = cx.entity().downgrade();
+                cx.new(|cx| ConstantEditor::new(constant, owner, false, window, cx))
+            })
+            .collect();
+        self.constant_errors.clear();
+        self.definitions.update(cx, |s, cx| {
+            s.set_value(self.project.definitions.clone(), window, cx)
         });
         for i in 0..3 {
             self.channels[i].update(cx, |s, cx| {
@@ -215,6 +251,30 @@ impl StudioModel {
         }
         cx.notify();
         Ok(())
+    }
+    fn add_constant(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name =
+            (1..)
+                .map(|i| format!("k{i}"))
+                .find(|name| {
+                    name != &self.project.parameter
+                        && self.project.constants.iter().all(|c| c.name != *name)
+                        && self.project.definitions.split([';', '\n']).all(|entry| {
+                            entry.split_once('=').is_none_or(|(n, _)| n.trim() != name)
+                        })
+                })
+                .unwrap();
+        let constant = Constant {
+            name,
+            value: 0.,
+            kind: ConstantKind::Free,
+        };
+        let owner = cx.entity().downgrade();
+        let row = cx.new(|cx| ConstantEditor::new(&constant, owner, true, window, cx));
+        row.update(cx, |s, cx| s.focus_name(window, cx));
+        self.constants.push(row);
+        self.project.constants.push(constant);
+        self.rebuild(cx);
     }
     fn sync_slices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let c = self.curve.at(self.project.cursor);
@@ -360,12 +420,36 @@ impl StudioPanel {
                 ),
             )
             .child(caption("One parameter on [0, 1]. Hue is in degrees.", cx))
-            .child(caption("Constants · name = value; …", cx))
             .child(
-                Input::new(&m.constants)
-                    .small()
-                    .aria_label("Custom constants"),
+                row()
+                    .justify_between()
+                    .child(caption("Constants", cx))
+                    .child(
+                        Button::new("add-constant")
+                            .label("+ Add")
+                            .small()
+                            .ghost()
+                            .tooltip("Add a typed constant · double-click a name to rename")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.model.update(cx, |m, cx| m.add_constant(window, cx))
+                            })),
+                    ),
             );
+        for constant in &m.constants {
+            content = content.child(constant.clone());
+        }
+        content = content
+            .child(caption("Variables · name = expression", cx))
+            .child(
+                Textarea::new(&m.definitions)
+                    .small()
+                    .font_family("Consolas")
+                    .aria_label("Variable definitions"),
+            )
+            .child(caption(
+                "Use the parameter, constants, and earlier variables.",
+                cx,
+            ));
         for i in 0..3 {
             let constant = p.constant_axis() == Some(i);
             let locked = constant

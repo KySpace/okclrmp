@@ -1,11 +1,13 @@
 //! A small, deliberately closed Julia-like scalar expression language.
 //! No host-language evaluation, assignments, IO, or arbitrary code execution.
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub enum Expr {
     Number(f64),
     Param,
+    Shared(Arc<Expr>),
     Unary(char, Box<Expr>),
     Binary(String, Box<Expr>, Box<Expr>),
     If(Box<Expr>, Box<Expr>, Box<Expr>),
@@ -17,6 +19,7 @@ impl Expr {
         match self {
             Self::Number(v) => *v,
             Self::Param => t,
+            Self::Shared(expr) => expr.eval(t),
             Self::Unary(op, a) => match op {
                 '-' => -a.eval(t),
                 '!' => truth(!yes(a.eval(t))),
@@ -197,7 +200,7 @@ struct Parser<'a> {
     tokens: Vec<Token>,
     i: usize,
     param: &'a str,
-    constants: &'a BTreeMap<String, f64>,
+    symbols: &'a BTreeMap<String, Expr>,
     depth: usize,
 }
 impl Parser<'_> {
@@ -245,8 +248,8 @@ impl Parser<'_> {
                     Expr::Call(name, args)
                 } else if name == self.param {
                     Expr::Param
-                } else if let Some(v) = self.constants.get(&name) {
-                    Expr::Number(*v)
+                } else if let Some(v) = self.symbols.get(&name) {
+                    v.clone()
                 } else {
                     Expr::Number(match name.as_str() {
                         "pi" | "π" => std::f64::consts::PI,
@@ -255,7 +258,7 @@ impl Parser<'_> {
                         "false" => 0.,
                         _ => {
                             return Err(format!(
-                                "Unknown ‘{name}’. Use only ‘{}’ and defined constants.",
+                                "Unknown ‘{name}’. Use ‘{}’, constants, or earlier variable definitions.",
                                 self.param
                             ));
                         }
@@ -304,24 +307,107 @@ impl Parser<'_> {
     }
 }
 pub fn compile(s: &str, param: &str, constants: &BTreeMap<String, f64>) -> Result<Expr, String> {
-    if !identifier(param) || reserved(param) || constants.contains_key(param) {
-        return Err("Choose a parameter name distinct from constants and functions".into());
+    compile_with_symbols(
+        s,
+        param,
+        &constants
+            .iter()
+            .map(|(k, v)| (k.clone(), Expr::Number(*v)))
+            .collect(),
+    )
+}
+pub fn compile_with_symbols(
+    s: &str,
+    param: &str,
+    symbols: &BTreeMap<String, Expr>,
+) -> Result<Expr, String> {
+    if !identifier(param) || reserved(param) || symbols.contains_key(param) {
+        return Err(
+            "Choose a parameter name distinct from constants, variables, and functions".into(),
+        );
     }
     let mut p = Parser {
         tokens: lex(s)?,
         i: 0,
         param,
-        constants,
+        symbols,
         depth: 0,
     };
     let e = p.expr(0)?;
     if p.tokens[p.i] != Token::End {
         return Err("Unexpected trailing input. Use * for multiplication.".into());
     }
+    // Shared definitions form a DAG. Bound expanded work as well as nesting so
+    // repeated references cannot cause exponential evaluation or stack growth.
+    fn budget(e: &Expr, remaining: &mut usize, depth: usize) -> bool {
+        if *remaining == 0 || depth > 128 {
+            return false;
+        }
+        *remaining -= 1;
+        match e {
+            Expr::Shared(e) => budget(e, remaining, depth + 1),
+            Expr::Unary(_, e) => budget(e, remaining, depth + 1),
+            Expr::Binary(_, a, b) => {
+                budget(a, remaining, depth + 1) && budget(b, remaining, depth + 1)
+            }
+            Expr::If(c, a, b) => {
+                budget(c, remaining, depth + 1)
+                    && budget(a, remaining, depth + 1)
+                    && budget(b, remaining, depth + 1)
+            }
+            Expr::Call(_, args) => args.iter().all(|e| budget(e, remaining, depth + 1)),
+            _ => true,
+        }
+    }
+    if !budget(&e, &mut 16384, 0) {
+        return Err("Expression and variable definitions are too complex".into());
+    }
     Ok(e)
 }
+
+/// Definitions are evaluated in written order and can use the parameter,
+/// constants, and preceding definitions. No shadowing or forward references.
+pub fn definitions(
+    source: &str,
+    param: &str,
+    constants: &BTreeMap<String, f64>,
+) -> Result<BTreeMap<String, Expr>, String> {
+    if source.len() > 16384 {
+        return Err("Variable definitions are too long (16384 bytes maximum)".into());
+    }
+    if !identifier(param) || reserved(param) || constants.contains_key(param) {
+        return Err(
+            "Choose a parameter name distinct from constants, variables, and functions".into(),
+        );
+    }
+    let mut symbols: BTreeMap<_, _> = constants
+        .iter()
+        .map(|(k, v)| (k.clone(), Expr::Number(*v)))
+        .collect();
+    for (i, entry) in source
+        .split(['\n', ';'])
+        .map(str::trim)
+        .filter(|v| !v.is_empty() && !v.starts_with('#'))
+        .enumerate()
+    {
+        if i >= 64 {
+            return Err("Use at most 64 variable definitions".into());
+        }
+        let (name, value) = entry
+            .split_once('=')
+            .ok_or("Variables use name = expression, separated by ; or newlines")?;
+        let name = name.trim();
+        if !identifier(name) || reserved(name) || name == param || symbols.contains_key(name) {
+            return Err(format!("Invalid or duplicate variable ‘{name}’"));
+        }
+        let expr = compile_with_symbols(value, param, &symbols)
+            .map_err(|e| format!("Variable ‘{name}’: {e}"))?;
+        symbols.insert(name.into(), Expr::Shared(Arc::new(expr)));
+    }
+    Ok(symbols)
+}
 pub fn constants(s: &str, param: &str) -> Result<BTreeMap<String, f64>, String> {
-    let mut values = BTreeMap::new();
+    let mut values: BTreeMap<String, f64> = BTreeMap::new();
     for entry in s
         .split(['\n', ';'])
         .map(str::trim)
@@ -339,7 +425,10 @@ pub fn constants(s: &str, param: &str) -> Result<BTreeMap<String, f64>, String> 
             tokens: lex(source)?,
             i: 0,
             param: "",
-            constants: &values,
+            symbols: &values
+                .iter()
+                .map(|(k, v)| (k.clone(), Expr::Number(*v)))
+                .collect(),
             depth: 0,
         };
         let v = p.expr(0)?.eval(0.);
@@ -389,5 +478,42 @@ mod tests {
         assert_eq!(eval("sign(0)", 0.), 0.);
         assert_eq!(eval("round(2.5)", 0.), 2.);
         assert_eq!(eval("round(3.5)", 0.), 4.);
+    }
+    #[test]
+    fn derived_variables_follow_the_parameter_constants_and_written_order() {
+        let constants = constants("amplitude=0.36; hue=263", "v").unwrap();
+        let source = "# reusable shape\nbias = 2 * abs(v - 0.5); lightness = 1 - amplitude * bias\nangle = v < 0.5 ? 15 : hue";
+        let symbols = definitions(source, "v", &constants).unwrap();
+        let l = compile_with_symbols("lightness", "v", &symbols).unwrap();
+        let h = compile_with_symbols("angle", "v", &symbols).unwrap();
+        for i in 0..=100 {
+            let t = i as f64 / 100.;
+            assert!((l.eval(t) - (1. - 0.36 * 2. * (t - 0.5).abs())).abs() < 1e-12);
+            assert_eq!(h.eval(t), if t < 0.5 { 15. } else { 263. });
+        }
+        for source in [
+            "v=2",
+            "pi=v",
+            "hue=v",
+            "a=v; a=2",
+            "a=a+1",
+            "a=b; b=a",
+            "a=missing+v",
+            "a=v=1",
+            "a=sin()",
+        ] {
+            assert!(definitions(source, "v", &constants).is_err(), "{source}");
+        }
+        let explosive = (0..20)
+            .map(|i| {
+                if i == 0 {
+                    "a0=v".into()
+                } else {
+                    format!("a{i}=a{}+a{}", i - 1, i - 1)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+        assert!(definitions(&explosive, "v", &constants).is_err());
     }
 }

@@ -1,0 +1,86 @@
+{
+  "name": "Turbo · spectral study",
+  "parameter": "t",
+  "constants": [
+    {
+      "name": "hue",
+      "value": 255.67,
+      "kind": "Degree"
+    },
+    {
+      "name": "c_0",
+      "value": 0.0,
+      "kind": "Fraction"
+    },
+    {
+      "name": "c_1",
+      "value": 0.08,
+      "kind": "Fraction"
+    },
+    {
+      "name": "c_c",
+      "value": 0.35,
+      "kind": "Fraction"
+    },
+    {
+      "name": "l_min",
+      "value": 0.26,
+      "kind": "Fraction"
+    }
+  ],
+  "definitions": "",
+  "expressions": [
+    "1-(1-l_min)*t",
+    "c_1*t^2 + c_c*t*(1-t) + c_0*(1-t)^2",
+    "hue"
+  ],
+  "mode": "Expressions",
+  "spline": {
+    "nodes": [
+      {
+        "position": [
+          1.0,
+          0.0
+        ],
+        "incoming": null,
+        "outgoing": [
+          -0.14170390367507935,
+          0.1523251235485077
+        ],
+        "mode": "Corner"
+      },
+      {
+        "position": [
+          0.30440839529037467,
+          0.253496477007866
+        ],
+        "incoming": [
+          0.2567688375711441,
+          0.24067911505699158
+        ],
+        "outgoing": null,
+        "mode": "Corner"
+      }
+    ],
+    "knot": 0.5,
+    "linear": false,
+    "symmetric": false
+  },
+  "spline_constant": false,
+  "imported": [],
+  "slices": [
+    0.65,
+    0.1,
+    142.3000030517578
+  ],
+  "cursor": 0.9340000152587891,
+  "sample_count": 256,
+  "map_chroma": true,
+  "yaw": 3.2699986,
+  "pitch": 0.5041293,
+  "zoom": 1.0,
+  "hue_origin": 0.0,
+  "polar": false,
+  "show_slice_contours": false,
+  "orthographic": false
+}

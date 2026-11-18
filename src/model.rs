@@ -1,5 +1,6 @@
 use crate::{
     color::Oklch,
+    constants::{Constant, deserialize_constants},
     expr::{self, Expr},
     spline::Spline,
 };
@@ -108,7 +109,10 @@ pub enum Mode {
 pub struct Project {
     pub name: String,
     pub parameter: String,
-    pub constants: String,
+    #[serde(default, deserialize_with = "deserialize_constants")]
+    pub constants: Vec<Constant>,
+    #[serde(default)]
+    pub definitions: String,
     pub expressions: [String; 3],
     pub mode: Mode,
     /// Legacy quadratic anchors, retained only for reading older projects.
@@ -189,7 +193,8 @@ impl Project {
         let mut project = Self {
             name: name.into(),
             parameter: "t".into(),
-            constants: constants.into(),
+            constants: Constant::from_legacy(constants, "t").expect("valid preset constants"),
+            definitions: String::new(),
             expressions: expressions.map(str::to_string),
             mode,
             nodes,
@@ -262,7 +267,25 @@ impl Project {
         {
             return Err("Project has invalid samples or reference colors".into());
         }
-        let constants = expr::constants(&self.constants, &self.parameter)?;
+        let mut constants = std::collections::BTreeMap::new();
+        for constant in &self.constants {
+            if !expr::identifier(&constant.name)
+                || expr::reserved(&constant.name)
+                || constant.name == self.parameter
+                || constants.contains_key(&constant.name)
+            {
+                return Err(format!("Invalid or duplicate constant ‘{}’", constant.name));
+            }
+            if constant.kind.constrain(constant.value) != Some(constant.value) {
+                return Err(format!(
+                    "Constant ‘{}’ is outside its {} range",
+                    constant.name,
+                    constant.kind.name()
+                ));
+            }
+            constants.insert(constant.name.clone(), constant.value);
+        }
+        let symbols = expr::definitions(&self.definitions, &self.parameter, &constants)?;
         let mut channels = Vec::new();
         for a in 0..3 {
             if self.constant_axis() == Some(a) {
@@ -275,7 +298,7 @@ impl Project {
                 Mode::Imported => false,
             };
             channels.push(if used {
-                expr::compile(&self.expressions[a], &self.parameter, &constants)
+                expr::compile_with_symbols(&self.expressions[a], &self.parameter, &symbols)
                     .map_err(|e| format!("{}: {e}", axis_name(a)))?
             } else {
                 Expr::Number(0.)
@@ -543,6 +566,79 @@ pub fn connected(a: Oklch, b: Oklch) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn typed_constants_and_derived_variables_update_and_roundtrip() {
+        use crate::constants::ConstantKind;
+        let mut p = Project::preset(2);
+        p.parameter = "v".into();
+        p.definitions = "bias = 2 * abs(v - 0.5); lightness = 1 - 0.36*bias".into();
+        p.expressions = [
+            "lightness".into(),
+            "bias*c_max/2".into(),
+            "v < 0.5 ? 15 : 263".into(),
+        ];
+        let curve = p.compile().unwrap();
+        for sample in curve.sample(101) {
+            assert!((sample.color.l - (1. - 0.36 * 2. * (sample.t - 0.5).abs())).abs() < 1e-12);
+            assert!((sample.color.c - (sample.t - 0.5).abs() * 0.3).abs() < 1e-12);
+        }
+        p.constants[0].value = 0.2;
+        let changed = p.compile().unwrap();
+        assert_eq!(changed.at(0.).c, 0.1);
+        assert_eq!(changed.at(0.5).c, 0.);
+        let json = serde_json::to_string(&p).unwrap();
+        let restored: Project = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.constants, p.constants);
+        assert_eq!(restored.definitions, p.definitions);
+        assert_eq!(restored.compile().unwrap().at(0.25), changed.at(0.25));
+        p.constants[0].value = 1.01;
+        assert!(p.compile().is_err());
+        p.constants[0].kind = ConstantKind::Free;
+        assert!(p.compile().is_ok());
+        p.constants.push(p.constants[0].clone());
+        assert!(p.compile().is_err());
+        p.constants.pop();
+        p.definitions = "bias=sqrt(v-0.5); lightness=bias".into();
+        assert!(p.compile().is_err());
+    }
+    #[test]
+    fn legacy_constant_assignments_migrate_without_changing_samples() {
+        for i in 0..4 {
+            let original = Project::preset(i);
+            let mut json = serde_json::to_value(&original).unwrap();
+            json.as_object_mut().unwrap().remove("definitions");
+            let mut source = original
+                .constants
+                .iter()
+                .map(|c| format!("{}={}", c.name, c.value))
+                .collect::<Vec<_>>()
+                .join(";");
+            // Chained constant assignments and hue endpoint semantics survive.
+            source.push_str("; first=0.2; second=1-first; h_end=360");
+            json["constants"] = source.into();
+            let migrated: Project = serde_json::from_value(json).unwrap();
+            assert!(migrated.definitions.is_empty());
+            assert_eq!(migrated.constants.last().unwrap().value, 360.);
+            assert_eq!(
+                original
+                    .compile()
+                    .unwrap()
+                    .sample(101)
+                    .iter()
+                    .map(|s| s.color)
+                    .collect::<Vec<_>>(),
+                migrated
+                    .compile()
+                    .unwrap()
+                    .sample(101)
+                    .iter()
+                    .map(|s| s.color)
+                    .collect::<Vec<_>>()
+            );
+            let saved = serde_json::to_value(&migrated).unwrap();
+            assert!(saved["constants"].is_array());
+        }
+    }
     #[test]
     fn spline_goes_through_all_nodes() {
         let n = [[0., 0.], [0.5, 0.15], [1., 0.]];

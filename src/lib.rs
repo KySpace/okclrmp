@@ -1,5 +1,6 @@
 pub mod appearance;
 pub mod color;
+pub mod constants;
 pub mod exchange;
 pub mod expr;
 mod gamut_mesh;

@@ -1,4 +1,4 @@
-# Verification — 2026-11-17
+# Verification — 2026-11-18
 
 Verified on Windows with Rust `1.101.0-nightly (249c1e4e3 2026-11-05)`, GPUI Kit 0.10.0, and NVIDIA GeForce RTX 4050 Laptop GPU. Native interaction checks used the computer-use skill against the built app. Clipboard and file-dialog checks ran the app with normal desktop access; restricted shell processes cannot access the same clipboard.
 
@@ -6,7 +6,7 @@ Verified on Windows with Rust `1.101.0-nightly (249c1e4e3 2026-11-05)`, GPUI Kit
 
 | Check | Result |
 | --- | --- |
-| `cargo test --all-targets` | 39 core tests passed; 5 GPU tests are opt-in; binary test target built successfully |
+| `cargo test --all-targets` | 45 core tests passed; 5 GPU tests are opt-in; binary test target built successfully |
 | `cargo test --lib -- --ignored --nocapture` | All five hardware GPU tests passed on the RTX 4050 |
 | `cargo test -p accesskit_windows --lib unavailable_window_returns_uia_error_without_panicking` | 1 targeted teardown regression passed |
 | `cargo clippy --all-targets -- -D warnings` | Passed |
@@ -68,6 +68,16 @@ Model and camera regressions check both orbit limits, switching coordinate modes
 `cargo test --lib gamut_slice_contours_and_top_down_polar_render_on_gpu -- --ignored --nocapture` passed on the RTX 4050. The shader draws L/C/H level sets on the existing gamut boundary with derivative-based coverage and contrasting outlines. Rectangular mode uses three plane intersections; polar mode uses a lightness plane, chroma cylinder, and hue half-plane. Surface depth testing hides occluded contours. The image cache includes the contour flag and the slice values while enabled.
 
 The hardware regression checks rectangular, oblique polar, and exactly top-down views in both themes. All three contour colors appear, moving the L slice changes the render, H=0/H=360 images match exactly, and a back-side hue slice does not draw an H+180 contour on the front. Sampled chart-cap interior pixels stay unchanged when a hue slice coincides with the seam; the cap area is excluded from the hue contour to avoid floating-point speckling. These view options leave the colormap samples unchanged. The twelve before/after renders and seam captures under `.research/surface-contours/` were visually inspected.
+
+## Typed constants and reusable variables
+
+Constant fields now cap fractional precision at two digits on initialization, dragging, Up/Down/wheel stepping, typing/pasting, and commit. The numeric regressions include rounding, precision reduction, floating point noise, negative zero formatting, and retained scientific exponents. Core project data and computed colormap samples retain their existing precision.
+
+Six additional core tests cover the numeric operations used by the UI: drag rates, finite-value validation, degree wrapping (including floating point rounding at 360°), fraction limits, integer rounding, caret-relative steps on either side of the decimal, carry/borrow/sign changes, retained trailing zeroes, scientific mantissa/exponent stepping, and typed constraints during stepping. Expression tests check parameter-dependent definitions, references to constants and earlier definitions, ternaries, duplicate/reserved names, undefined/forward/cyclic references, and bounded evaluation complexity. Model tests independently compare derived L/C values against their formulas, tune a constant, save/load the typed rows and definitions, reject invalid values, and migrate legacy chained assignments without changing curve samples in all four presets.
+
+The native row uses a horizontal resize cursor, a window-level drag listener while active, and a type menu. Double-click starts name editing; Enter moves focus to the numeric value and Escape restores the previous name. Numeric Up/Down handling captures keys before the text input's navigation actions. Wheel handling requires a focused, unselected numeric caret and accumulates fractional wheel deltas. Incomplete numeric text pauses export/save and retains the last valid curve; typed constraints normalize on Enter/blur. The separate definitions textarea shares the live rebuild path used by channel expressions.
+
+`target/debug/okclrmp-variables-preview.exe` builds from the current app sources. Native automation returned `Computer Use was not approved to use okclrmp-variables-preview`; no native gesture or layout pass is claimed. Manual review should cover dragging a label beyond the editor bounds, Up/Down/wheel at different caret positions, all four type choices, add/rename/remove, live variable changes, and switching presets/projects and themes. The earlier GPU checks above are unchanged; GPU rendering code was not modified for this feature.
 
 A separate `target/debug/okclrmp-projection-preview.exe` provides a native build for manual interaction review. No new native mouse-gesture pass is claimed.
 

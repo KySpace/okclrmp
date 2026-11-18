@@ -1,0 +1,28 @@
+{
+  "name": "Diverging · ember / iris",
+  "parameter": "t",
+  "constants": "c_max=0.20",
+  "expressions": [
+    "1 - 0.30*2*abs(t - 0.5)",
+    "2*abs(t - 0.5)*c_max",
+    "t < 0.5 ? 142 : 327"
+  ],
+  "mode": "Expressions",
+  "spline_constant": false,
+  "imported": [],
+  "slices": [
+    0.7670000195503235,
+    0.09319999217987061,
+    339.1000061035156
+  ],
+  "cursor": 0.2670000195503235,
+  "sample_count": 256,
+  "map_chroma": true,
+  "yaw": 1.7713321,
+  "pitch": 0.35666597,
+  "zoom": 1.0,
+  "hue_origin": 0.0,
+  "polar": false,
+  "show_slice_contours": false,
+  "orthographic": false
+}
