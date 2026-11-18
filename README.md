@@ -39,11 +39,23 @@ The second command executes both WGSL pipelines on the actual adapter, compares 
 
 Smooth joins adjust the middle parameter in proportion to the incoming/outgoing handle lengths, so independent handle lengths maintain parametric C1 continuity. Auto C2 solves both derivatives at that parameter. Moving an anchor translates its handles with it, preserving their offsets; this may release Auto C2 to Smooth. With global symmetry enabled, middle smooth handles are horizontal and equal to satisfy both constraints.
 
+## Output inspection and defaults
+
+New sessions start in the light theme, and new preset projects use orthographic gamut projection. Saved projects retain their chosen projection mode.
+
+In **Colormap output**, the top row groups the fallback dropdown, RGB clipping toggle, preview sampling dropdown, and inversion toggle. Preview sampling offers **Continuous**, fixed swatch counts, and **Use output count**, independently of export sampling. Click or drag the colorbar to inspect a value; sampled previews snap to their swatches. Left/Right steps one swatch, or 0.001 in continuous mode (0.01 with Shift); Home/End selects a displayed endpoint.
+
+Below the bar, click the color/HEX button to copy the inspected color as HEX. The L/C/H values and target icon (**Move slices to this color**) share that row. Above the full, scrollable serialized text, the **Samples** and encoding dropdowns share one row with copy and export icons. Narrow docks scroll these control rows horizontally instead of wrapping them.
+
+**Invert** reverses both the colorbar and exported sample order, and is saved with the project. The curve, its editable nodes, and the inspected source color stay unchanged; marker placement, scrubbing, keyboard movement, and endpoint labels follow the displayed direction. Older projects default to forward output.
+
+The **Fallback** dropdown offers original sRGB, CMYK, and grayscale previews. CMYK uses Windows color transforms through the installed `RSWOP.icm` print profile, using relative colorimetric intent. This preview represents that SWOP printing condition; another press or paper needs its own profile. Grayscale preserves linear-sRGB luminance. Fallbacks affect the preview only; copied/exported samples keep their selected original format and mapping policy. CMYK is disabled with an explanation if the required system profiles are unavailable. See [Windows color transforms](https://learn.microsoft.com/en-us/windows/win32/api/icm/nf-icm-translatecolors).
+
 ## Expression language
 
 One chosen parameter ranges over `[0, 1]`. Hue uses degrees. Functions without a `d` suffix use radians. Constants are named numeric rows, independent of the parameter. Degree values wrap into `[0, 360)`, fractions clamp to `[0, 1]`, integers round to whole numbers, and free values accept any finite number. Values normalize in the field on Enter or focus loss. Horizontal label dragging changes degrees by 0.5° per logical pixel, fractions by 0.002, integers by one per ten pixels, and free values by 0.01.
 
-Constant value fields show at most two digits after the decimal point. Dragging, stepping, and typed/pasted numbers follow the same limit; trailing zeroes are optional.
+Constant value fields use type-specific decimal limits: **Fraction: 3**, **Degree: 1**, **Free: 2**, **Integer: 0**. Loading, dragging, stepping, and typed/pasted numbers follow these limits; trailing zeroes are optional. Curve computation and serialized output keep their existing precision.
 
 Each constant's slider-link icon opens its binding menu: **Degree → H**, **Fraction → L or C**, or **Unbound**. One named constant can own each slider. Binding initially moves the slice to the constant's value; numeric edits and slider movement then update each other. C uses actual chroma in `[0, 0.4]`, so binding to C clamps a larger fraction to 0.4; L uses `[0, 1]`. Changing to an incompatible type removes the link. Bindings are saved in the project, and older projects start unbound.
 

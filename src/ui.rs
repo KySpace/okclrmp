@@ -19,6 +19,8 @@ use okclrmp::{
 use std::{rc::Rc, sync::Arc, time::Duration};
 #[path = "ui/constant_editor.rs"]
 mod constant_editor;
+#[path = "ui/output.rs"]
+mod output;
 use constant_editor::ConstantEditor;
 use okclrmp::constants::{Constant, ConstantKind, SliderBinding};
 
@@ -89,7 +91,7 @@ pub struct StudioModel {
     constant_errors: std::collections::HashMap<EntityId, String>,
     definitions: Entity<TextareaState>,
     channels: [Entity<InputState>; 3],
-    sliders: [Entity<SliderState>; 4],
+    sliders: [Entity<SliderState>; 3],
     import_text: Entity<TextareaState>,
     _subscriptions: Vec<Subscription>,
 }
@@ -120,13 +122,9 @@ impl StudioModel {
             cx.new(|_| {
                 SliderState::new()
                     .min(0.)
-                    .max([1., 0.4, 360., 1.][i])
-                    .step([0.001, 0.001, 0.1, 0.001][i])
-                    .default_value(if i < 3 {
-                        project.slices[i] as f32
-                    } else {
-                        project.cursor as f32
-                    })
+                    .max([1., 0.4, 360.][i])
+                    .step([0.001, 0.001, 0.1][i])
+                    .default_value(project.slices[i] as f32)
             })
         });
         let import_text = cx.new(|cx| {
@@ -155,28 +153,24 @@ impl StudioModel {
                 window,
                 move |this, _, event: &SliderEvent, window, cx| {
                     if let SliderEvent::Change(value) = event {
-                        if i < 3 {
-                            // Programmatic slider synchronization must not round
-                            // a saved f64 constant to f32 unless the user moves it.
-                            if this.project.slices[i] as f32 == value.start() {
-                                return;
-                            }
-                            let mut changed = this.project.set_slice(
-                                i,
-                                (value.start() as f64).clamp(0., [1., model::C_MAX, 360.][i]),
-                            );
-                            if let Some(index) = this.project.bound_constant(i) {
-                                let row = &this.constants[index];
-                                let constant = &this.project.constants[index];
-                                changed |= this.constant_errors.remove(&row.entity_id()).is_some();
-                                row.update(cx, |s, cx| s.sync_value(constant.value, window, cx));
-                            }
-                            if changed {
-                                this.rebuild(cx);
-                                return;
-                            }
-                        } else {
-                            this.project.cursor = value.start() as f64;
+                        // Programmatic slider synchronization must not round
+                        // a saved f64 constant to f32 unless the user moves it.
+                        if this.project.slices[i] as f32 == value.start() {
+                            return;
+                        }
+                        let mut changed = this.project.set_slice(
+                            i,
+                            (value.start() as f64).clamp(0., [1., model::C_MAX, 360.][i]),
+                        );
+                        if let Some(index) = this.project.bound_constant(i) {
+                            let row = &this.constants[index];
+                            let constant = &this.project.constants[index];
+                            changed |= this.constant_errors.remove(&row.entity_id()).is_some();
+                            row.update(cx, |s, cx| s.sync_value(constant.value, window, cx));
+                        }
+                        if changed {
+                            this.rebuild(cx);
+                            return;
                         }
                         cx.notify();
                     }
@@ -254,12 +248,8 @@ impl StudioModel {
                 s.set_value(self.project.expressions[i].clone(), window, cx)
             });
         }
-        for i in 0..4 {
-            let v = if i < 3 {
-                self.project.slices[i]
-            } else {
-                self.project.cursor
-            };
+        for i in 0..3 {
+            let v = self.project.slices[i];
             self.sliders[i].update(cx, |s, cx| s.set_value(v as f32, window, cx));
         }
         cx.notify();
@@ -339,6 +329,13 @@ struct StudioPanel {
     help_tooltip: Option<AnyTooltip>,
     export_space: ExportSpace,
     import_space: ImportSpace,
+    bar_bounds: Bounds<Pixels>,
+    bar_drag: bool,
+    fallback: okclrmp::preview::Fallback,
+    sampling_preview: okclrmp::preview::SamplingPreview,
+    proof: Option<Result<okclrmp::preview::CmykProof, String>>,
+    fallback_error: Option<String>,
+    output_text: Option<Entity<TextareaState>>,
 }
 impl StudioPanel {
     fn new(kind: Kind, model: Entity<StudioModel>, cx: &mut Context<Self>) -> Self {
@@ -359,13 +356,19 @@ impl StudioPanel {
             help_tooltip: None,
             export_space: ExportSpace::Hex,
             import_space: ImportSpace::Hex,
+            bar_bounds: Bounds::default(),
+            bar_drag: false,
+            fallback: Default::default(),
+            sampling_preview: Default::default(),
+            proof: None,
+            fallback_error: None,
+            output_text: None,
         }
     }
     fn editor(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let colors = palette(cx);
         let m = self.model.read(cx);
         let p = m.project.clone();
-        let current = m.curve.at(p.cursor);
         let mut content = column()
             .p_4()
             .gap_3()
@@ -484,7 +487,15 @@ impl StudioPanel {
                             .when(locked, |r| {
                                 r.child(caption(
                                     if constant {
-                                        format!("constant {:.3} · slider", p.slices[i])
+                                        format!(
+                                            "constant {} · slider",
+                                            (if i == 2 {
+                                                ConstantKind::Degree
+                                            } else {
+                                                ConstantKind::Fraction
+                                            })
+                                            .display(p.slices[i])
+                                        )
                                     } else if matches!(p.mode, Mode::Imported) {
                                         "from reference".into()
                                     } else {
@@ -541,12 +552,7 @@ impl StudioPanel {
                 );
             }
         }
-        content=content.child(section("INSPECT THE PATH", cx))
-            .child(row().child(div().w_8().h_5().rounded_sm().bg(color_value(current))).child(caption(current.hex(true), cx)))
-            .child(row().child(div().flex_1().min_w_0().child(Slider::new(&m.sliders[3]).accessibility_label("Curve parameter"))).child(caption(format!("{} {:.3}",p.parameter,p.cursor),cx).w(px(88.)).flex_shrink_0().font_family("Consolas").text_right()))
-            .child(caption(format!("L {:.4}   C {:.4}   H {:.2}°",current.l,current.c,current.h), cx).font_family("Consolas"))
-            .child(Button::new("follow").label("Move slices to this color").small().w_full().on_click(cx.listener(|this,_,window,cx|this.model.update(cx,|m,cx|m.sync_slices(window,cx)))))
-            .child(section("EXPRESSION NOTES", cx))
+        content=content.child(section("EXPRESSION NOTES", cx))
             .child(caption("+, −, *, /, ^ · comparisons · && · ||\ncondition ? a : b\nabs, sin, cos, sind, sqrt, min, max, clamp, mod, pi\nUse explicit * for multiplication.", cx));
         div()
             .id("editor-scroll")
@@ -702,178 +708,6 @@ impl StudioPanel {
                 m.rebuild(cx);
             }
         });
-    }
-    fn output(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let colors = palette(cx);
-        let m = self.model.read(cx);
-        let p = &m.project;
-        let invalid = m.error.is_some();
-        let count = p.sample_count;
-        let data = exchange::export(&m.curve, count, self.export_space, p.map_chroma);
-        let samples = m.curve.sample(count);
-        let oog = samples.iter().filter(|s| !s.color.in_gamut()).count();
-        let curve = m.curve.clone();
-        let mapping = p.map_chroma;
-        let param = p.parameter.clone();
-        let cursor = p.cursor;
-        let bar = canvas(
-            |bounds, _, _| bounds,
-            move |_, bounds, window, cx| {
-                let steps = 512;
-                for i in 0..steps {
-                    let col = curve.at(i as f64 / (steps - 1) as f64);
-                    let x = bounds.origin.x + bounds.size.width * (i as f32 / steps as f32);
-                    let w = bounds.size.width / steps as f32 + px(0.5);
-                    let a = col.rgba8(mapping);
-                    window.paint_quad(fill(
-                        Bounds::new(point(x, bounds.origin.y), size(w, bounds.size.height)),
-                        rgb(((a[0] as u32) << 16) | ((a[1] as u32) << 8) | a[2] as u32),
-                    ));
-                    if !col.in_gamut() {
-                        window.paint_quad(fill(
-                            Bounds::new(point(x, bounds.bottom() - px(3.)), size(w, px(3.))),
-                            rgb(colors.warning),
-                        ));
-                    }
-                }
-                let x = bounds.origin.x + bounds.size.width * cursor as f32;
-                for (width, color) in [(4., colors.curve_outline), (2., colors.curve)] {
-                    line(
-                        point(x, bounds.top()),
-                        point(x, bounds.bottom()),
-                        width,
-                        color,
-                        window,
-                    );
-                }
-                outlined_label(
-                    format!("{param} = {cursor:.3}"),
-                    point(
-                        (x + px(5.)).min(bounds.right() - px(85.)),
-                        bounds.top() + px(4.),
-                    ),
-                    window,
-                    cx,
-                );
-            },
-        )
-        .h(px(50.))
-        .w_full();
-        let mut controls = row().flex_wrap().gap_2().child(caption("Samples", cx));
-        for n in [16, 64, 256, 1024] {
-            controls = controls.child(
-                Button::new(("count", n))
-                    .label(n.to_string())
-                    .small()
-                    .selected(count == n)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.model.update(cx, |m, cx| {
-                            m.project.sample_count = n;
-                            cx.notify();
-                        })
-                    })),
-            );
-        }
-        controls = controls.child(div().flex_1());
-        for (i, space) in ExportSpace::ALL.into_iter().enumerate() {
-            controls = controls.child(
-                Button::new(("space", i))
-                    .label(space.label())
-                    .small()
-                    .selected(self.export_space == space)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.export_space = space;
-                        cx.notify();
-                    })),
-            );
-        }
-        let copy = data.clone();
-        let preview = data.lines().take(3).collect::<Vec<_>>().join(" ");
-        let content = column()
-            .w_full()
-            .p_3()
-            .gap_2()
-            .bg(rgb(colors.surface))
-            .child(
-                row()
-                    .flex_wrap()
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_sm()
-                            .child(format!("{count} colors · evenly sampled on [0, 1]")),
-                    )
-                    .child(caption(format!("{oog} outside sRGB"), cx))
-                    .child(
-                        Button::new("mapping")
-                            .label(if p.map_chroma {
-                                "✓ Map chroma for RGB"
-                            } else {
-                                "Clip RGB channels"
-                            })
-                            .small()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.model.update(cx, |m, cx| {
-                                    m.project.map_chroma = !m.project.map_chroma;
-                                    cx.notify();
-                                })
-                            })),
-                    )
-                    .child(
-                        Button::new("copy-colors")
-                            .label("Copy colors")
-                            .small()
-                            .primary()
-                            .disabled(invalid)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                let message = match crate::clipboard::copy_text(window, cx, &copy) {
-                                    Ok(()) => "Colormap copied to clipboard".into(),
-                                    Err(e) => format!("Copy failed: {e}"),
-                                };
-                                this.model.update(cx, |m, cx| {
-                                    m.notice = message;
-                                    cx.notify();
-                                });
-                            })),
-                    )
-                    .child(
-                        Button::new("save-colors")
-                            .label("Export file…")
-                            .small()
-                            .disabled(invalid)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.save_text(
-                                    data.clone(),
-                                    if matches!(
-                                        this.export_space,
-                                        ExportSpace::Hex | ExportSpace::Rgb
-                                    ) {
-                                        "colormap.json"
-                                    } else {
-                                        "colormap.csv"
-                                    },
-                                    cx,
-                                );
-                            })),
-                    ),
-            )
-            .child(bar)
-            .child(
-                row()
-                    .justify_between()
-                    .child(caption("0.0", cx))
-                    .child(caption("Coral underline = original path outside sRGB", cx))
-                    .child(caption("1.0", cx)),
-            )
-            .child(controls)
-            .child(caption(preview, cx).font_family("Consolas").truncate());
-        div()
-            .id("output-scroll")
-            .size_full()
-            .overflow_y_scroll()
-            .bg(rgb(colors.surface))
-            .child(content)
-            .into_any_element()
     }
     fn save_text(&mut self, text: String, name: &str, cx: &mut Context<Self>) {
         let prompt =
@@ -1035,7 +869,7 @@ impl StudioPanel {
                     let axis = plane.axes().2;
                     let name = model::axis_name(axis);
                     let tip = if p.spline_constant {
-                        format!("{name} = {:.3} for the whole colormap. The {name} slice slider changes this constant. Click to restore its saved expression",p.slices[axis])
+                        format!("{name} = {} for the whole colormap. The {name} slice slider changes this constant. Click to restore its saved expression",(if axis == 2 { ConstantKind::Degree } else { ConstantKind::Fraction }).display(p.slices[axis]))
                     } else {
                         format!("Hold {name} constant at this plane's slice value and bind the {name} slider to the colormap")
                     };
@@ -1250,9 +1084,14 @@ impl StudioPanel {
                             .child(
                                 caption(
                                     format!(
-                                        "{} {:.2}{}",
+                                        "{} {}{}",
                                         model::axis_name(axis),
-                                        p.slices[axis],
+                                        (if axis == 2 {
+                                            ConstantKind::Degree
+                                        } else {
+                                            ConstantKind::Fraction
+                                        })
+                                        .display(p.slices[axis]),
                                         if axis == 2 { "°" } else { "" }
                                     ),
                                     cx,
@@ -1425,7 +1264,6 @@ impl StudioPanel {
             .unwrap();
         self.model.update(cx, |m, cx| {
             m.project.cursor = nearest.t;
-            m.sliders[3].update(cx, |s, cx| s.set_value(nearest.t as f32, window, cx));
             cx.notify();
         });
     }
@@ -1572,10 +1410,10 @@ impl Focusable for StudioPanel {
     }
 }
 impl Render for StudioPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         match self.kind {
             Kind::Editor => self.editor(cx),
-            Kind::Output => self.output(cx),
+            Kind::Output => self.output(window, cx),
             Kind::Import => self.importer(cx),
             Kind::Plot(plane) => self.plot(plane, cx),
         }

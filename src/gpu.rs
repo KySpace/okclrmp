@@ -622,6 +622,7 @@ mod tests {
     fn orthographic_projection_has_parallel_rays_and_predictable_zoom() {
         let mut p = Project {
             polar: true,
+            orthographic: false,
             yaw: 0.,
             pitch: 0.,
             ..Default::default()

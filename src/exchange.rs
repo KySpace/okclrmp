@@ -122,7 +122,19 @@ pub fn parse(input: &str, space: ImportSpace) -> Result<Vec<Oklch>, String> {
     Ok(colors)
 }
 pub fn export(curve: &Curve, count: usize, space: ExportSpace, map: bool) -> String {
-    let samples = curve.sample(count.clamp(2, 4096));
+    export_ordered(curve, count, space, map, false)
+}
+pub fn export_ordered(
+    curve: &Curve,
+    count: usize,
+    space: ExportSpace,
+    map: bool,
+    reverse: bool,
+) -> String {
+    let mut samples = curve.sample(count.clamp(2, 4096));
+    if reverse {
+        samples.reverse();
+    }
     match space {
         ExportSpace::Hex => serde_json::to_string_pretty(
             &samples.iter().map(|s| s.color.hex(map)).collect::<Vec<_>>(),
@@ -156,6 +168,36 @@ pub fn export(curve: &Curve, count: usize, space: ExportSpace, map: bool) -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn inversion_reverses_every_encoding_and_roundtrips_without_editing_the_curve() {
+        let mut project = crate::model::Project::preset(1);
+        let before = project.compile().unwrap().at(0.25);
+        project.reverse_output = true;
+        let restored: crate::model::Project =
+            serde_json::from_str(&serde_json::to_string(&project).unwrap()).unwrap();
+        assert!(restored.reverse_output);
+        let curve = restored.compile().unwrap();
+        assert_eq!(curve.at(0.25), before);
+        for space in ExportSpace::ALL {
+            let normal = export(&curve, 16, space, true);
+            let reversed = export_ordered(&curve, 16, space, true, true);
+            match space {
+                ExportSpace::Hex | ExportSpace::Rgb => {
+                    let normal: Vec<serde_json::Value> = serde_json::from_str(&normal).unwrap();
+                    let reversed: Vec<serde_json::Value> = serde_json::from_str(&reversed).unwrap();
+                    assert_eq!(normal.into_iter().rev().collect::<Vec<_>>(), reversed);
+                }
+                _ => assert_eq!(
+                    normal.lines().rev().collect::<Vec<_>>().join("\n"),
+                    reversed
+                ),
+            }
+        }
+        let mut old = serde_json::to_value(&project).unwrap();
+        old.as_object_mut().unwrap().remove("reverse_output");
+        let old: crate::model::Project = serde_json::from_value(old).unwrap();
+        assert!(!old.reverse_output);
+    }
     #[test]
     fn import_and_export_roundtrip() {
         let c = parse("[\"#f00\", \"#00ff00\", \"#0000ff\"]", ImportSpace::Hex).unwrap();

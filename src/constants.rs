@@ -50,6 +50,22 @@ pub enum ConstantKind {
 }
 impl ConstantKind {
     pub const ALL: [Self; 4] = [Self::Degree, Self::Fraction, Self::Integer, Self::Free];
+    pub fn decimal_places(self) -> usize {
+        match self {
+            Self::Degree => 1,
+            Self::Fraction => 3,
+            Self::Integer => 0,
+            Self::Free => 2,
+        }
+    }
+    pub fn display(self, value: f64) -> String {
+        let value = if self == Self::Integer {
+            value.round()
+        } else {
+            value
+        };
+        display_with_precision(value, self.decimal_places())
+    }
     pub fn can_bind(self, binding: SliderBinding) -> bool {
         matches!(
             (self, binding),
@@ -169,7 +185,7 @@ pub struct NumberEdit {
 }
 
 /// Step the decimal place immediately left of the caret (skipping a decimal
-/// separator). Keep at most two decimal places and the caret's place across carries.
+/// separator). Use the type's decimal limit and keep the caret's place across carries.
 /// Scientific mantissas and exponent digits are both supported.
 pub fn step_number(
     text: &str,
@@ -208,13 +224,14 @@ pub fn step_number_with_binding(
     let decimals = mantissa
         .split_once('.')
         .map_or(0, |(_, tail)| tail.len())
-        .min(2);
+        .min(kind.decimal_places());
     let decimal = mantissa.find('.').unwrap_or(mantissa.len());
     let exponent_digit = digit > exponent_at;
     let power = if exponent_digit {
         (text.len() - digit - 1) as i32
     } else {
-        (decimal as i32 - digit as i32 - i32::from(digit < decimal)).max(-2)
+        (decimal as i32 - digit as i32 - i32::from(digit < decimal))
+            .max(-(kind.decimal_places() as i32))
     };
     let (next, written_exponent) = if exponent_digit {
         let step = 10_i32.checked_pow(power as u32)?.checked_mul(direction)?;
@@ -251,10 +268,10 @@ pub fn step_number_with_binding(
         let mantissa = if (roundtrip - scaled).abs() <= scaled.abs() * f64::EPSILON * 4. {
             rounded
         } else {
-            display_value(scaled)
+            kind.display(scaled)
         };
         let candidate = format!("{mantissa}e{written_exponent}");
-        // When a bound cannot be represented with two mantissa decimals,
+        // When a bound cannot be represented at this mantissa precision,
         // use the ordinary value instead of rounding it outside that bound.
         if candidate
             .parse::<f64>()
@@ -263,7 +280,7 @@ pub fn step_number_with_binding(
         {
             candidate
         } else {
-            display_value(next)
+            kind.display(next)
         }
     } else {
         format!("{next:.decimals$}")
@@ -294,28 +311,33 @@ pub fn step_number_with_binding(
     })
 }
 
-/// Constant controls show at most two fractional digits, with no negative zero.
+/// Free scalar formatting, with no negative zero.
 pub fn display_value(value: f64) -> String {
-    let text = format!("{value:.2}")
-        .trim_end_matches('0')
-        .trim_end_matches('.')
-        .to_string();
+    ConstantKind::Free.display(value)
+}
+fn display_with_precision(value: f64, places: usize) -> String {
+    let text = format!("{value:.places$}");
+    let text = if places == 0 {
+        text
+    } else {
+        text.trim_end_matches('0').trim_end_matches('.').to_string()
+    };
     if text == "-0" { "0".into() } else { text }
 }
 
 /// Normalize excess precision while allowing unfinished input such as `-` or
 /// `1.2e-` to remain editable. Scientific notation retains its exponent.
-pub fn limit_precision(text: &str) -> Option<String> {
+pub fn limit_precision(text: &str, kind: ConstantKind) -> Option<String> {
     let exponent = text.find(['e', 'E']).unwrap_or(text.len());
     let mantissa = &text[..exponent];
     if mantissa
         .split_once('.')
-        .is_none_or(|(_, digits)| digits.len() <= 2)
+        .is_none_or(|(_, digits)| digits.len() <= kind.decimal_places())
     {
         return None;
     }
     let value = mantissa.parse::<f64>().ok().filter(|v| v.is_finite())?;
-    Some(format!("{}{}", display_value(value), &text[exponent..]))
+    Some(format!("{}{}", kind.display(value), &text[exponent..]))
 }
 
 #[cfg(test)]
@@ -371,10 +393,16 @@ mod tests {
         assert_eq!(display_value(0.1 + 0.2), "0.3");
         assert_eq!(display_value(136.596), "136.6");
         assert_eq!(display_value(-0.004), "0");
-        assert_eq!(limit_precision("0.1234"), Some("0.12".into()));
-        assert_eq!(limit_precision("1.234e-3"), Some("1.23e-3".into()));
-        assert_eq!(limit_precision("1.20"), None);
-        assert_eq!(limit_precision("-"), None);
+        assert_eq!(
+            limit_precision("0.1234", ConstantKind::Free),
+            Some("0.12".into())
+        );
+        assert_eq!(
+            limit_precision("1.234e-3", ConstantKind::Free),
+            Some("1.23e-3".into())
+        );
+        assert_eq!(limit_precision("1.20", ConstantKind::Free), None);
+        assert_eq!(limit_precision("-", ConstantKind::Free), None);
         assert_eq!(edit("1.20e-2", 3, 1).text, "1.30e-2");
         assert_eq!(edit("1.20e-2", 7, 1).text, "1.20e-1");
         assert!(step_number("-0.1", 1, ConstantKind::Free, 1).is_none());
@@ -384,6 +412,30 @@ mod tests {
     }
     #[test]
     fn digit_steps_obey_types() {
+        assert_eq!(ConstantKind::Fraction.display(0.12345), "0.123");
+        assert_eq!(ConstantKind::Degree.display(136.59), "136.6");
+        assert_eq!(ConstantKind::Free.display(12.3456), "12.35");
+        assert_eq!(ConstantKind::Integer.display(10.), "10");
+        assert_eq!(
+            limit_precision("0.1234", ConstantKind::Fraction),
+            Some("0.123".into())
+        );
+        assert_eq!(
+            limit_precision("136.59", ConstantKind::Degree),
+            Some("136.6".into())
+        );
+        assert_eq!(
+            step_number("0.123", 5, ConstantKind::Fraction, 1)
+                .unwrap()
+                .text,
+            "0.124"
+        );
+        assert_eq!(
+            step_number("359.9", 5, ConstantKind::Degree, 1)
+                .unwrap()
+                .text,
+            "0.0"
+        );
         assert_eq!(
             step_number_with_binding(
                 "0.40",
@@ -448,7 +500,7 @@ mod tests {
             step_number("2.0", 3, ConstantKind::Integer, -1)
                 .unwrap()
                 .text,
-            "1.0"
+            "1"
         );
     }
 }

@@ -6,14 +6,14 @@ Verified on Windows with Rust `1.101.0-nightly (249c1e4e3 2026-11-05)`, GPUI Kit
 
 | Check | Result |
 | --- | --- |
-| `cargo test --all-targets` | 48 core tests passed; 5 GPU tests are opt-in; binary test target built successfully |
-| `cargo test --lib -- --ignored --nocapture` | All five hardware GPU tests passed on the RTX 4050 |
+| `cargo test --all-targets` | 51 core tests passed; 6 GPU/profile tests are opt-in; binary test target built successfully |
+| `cargo test --lib -- --ignored --nocapture` | All five hardware GPU tests and the Windows CMYK profile test passed |
 | `cargo test -p accesskit_windows --lib unavailable_window_returns_uia_error_without_panicking` | 1 targeted teardown regression passed |
 | `cargo clippy --all-targets -- -D warnings` | Passed |
 | `cargo fmt --all --check` | Passed |
 | `okclrmp-projection-preview.exe --check-gpu` | Passed on the actual RTX 4050; separate build preserves the running app |
 
-GPU validation checks 368 C–L, 512 C–H, and 555 L–H interior pixels against the Rust OKLCH → sRGB conversion (1,435 comparisons, ≤2 byte-level difference). Filtered graticule pixels and pixels whose footprint touches the gamut boundary are excluded from this pointwise check. The 3D render contains 7,989 distinctly colored surface pixels with 4× MSAA. Image size and alpha are also checked. Four images are written under `.research/gpu-check/`.
+GPU validation checks 368 C–L, 512 C–H, and 555 L–H interior pixels against the Rust OKLCH → sRGB conversion (1,435 comparisons, ≤2 byte-level difference). Filtered graticule pixels and pixels whose footprint touches the gamut boundary are excluded from this pointwise check. The earlier perspective preview contains 7,989 distinctly colored surface pixels with 4× MSAA. Image size and alpha are also checked. Four images are written under `.research/gpu-check/`.
 
 Core tests cover conversion reference values and roundtrips, gamut boundaries, expression precedence/ternaries/constants/errors/builtins, cubic spline geometry and editing, legacy quadratic migration, spline channel ownership, slice intersections including jumps and tangencies, constant slice intervals, shortest-arc hue interpolation and 360° endpoints, saved project reproduction, import parsing, and output sample counts/endpoints/mapping policy.
 
@@ -71,7 +71,7 @@ The hardware regression checks rectangular, oblique polar, and exactly top-down 
 
 ## Typed constants and reusable variables
 
-Constant fields now cap fractional precision at two digits on initialization, dragging, Up/Down/wheel stepping, typing/pasting, and commit. The numeric regressions include rounding, precision reduction, floating point noise, negative zero formatting, and retained scientific exponents. Core project data and computed colormap samples retain their existing precision.
+Constant fields use precision limits of three digits for Fraction, one for Degree, two for Free, and zero for Integer, on initialization, dragging, Up/Down/wheel stepping, typing/pasting, and commit. The numeric regressions include rounding, precision reduction, floating point noise, negative zero formatting, retained scientific exponents, fractional thousandths, and hue tenths across 360°. Core project data and computed colormap samples retain their existing precision.
 
 Six additional core tests cover the numeric operations used by the UI: drag rates, finite-value validation, degree wrapping (including floating point rounding at 360°), fraction limits, integer rounding, caret-relative steps on either side of the decimal, carry/borrow/sign changes, retained trailing zeroes, scientific mantissa/exponent stepping, and typed constraints during stepping. Expression tests check parameter-dependent definitions, references to constants and earlier definitions, ternaries, duplicate/reserved names, undefined/forward/cyclic references, and bounded evaluation complexity. Model tests independently compare derived L/C values against their formulas, tune a constant, save/load the typed rows and definitions, reject invalid values, and migrate legacy chained assignments without changing curve samples in all four presets.
 
@@ -79,11 +79,23 @@ The native row uses a horizontal resize cursor, a window-level drag listener whi
 
 `target/debug/okclrmp-variables-preview.exe` builds from the current app sources. Native automation returned `Computer Use was not approved to use okclrmp-variables-preview`; no native gesture or layout pass is claimed. Manual review should cover dragging a label beyond the editor bounds, Up/Down/wheel at different caret positions, all four type choices, add/rename/remove, live variable changes, and switching presets/projects and themes. The earlier GPU checks above are unchanged; GPU rendering code was not modified for this feature.
 
+## Output inspection and fallback previews
+
+The light startup theme and orthographic preset defaults compile with the new output panel. The perspective camera regression explicitly selects perspective before comparing it with orthographic projection; all five hardware regressions pass with the changed project defaults.
+
+The colorbar owns the inspection parameter through click/drag, Left/Right, Shift, Home/End, and accessible slider actions. A window-level listener continues an active drag outside its bounds. The position helper is tested for interpolation, both clamped endpoints, zero width, and non-finite input. Inspection values and the slice-follow target icon sit below the bar beside a color/HEX copy button. A read-only textarea holds the full export string, and its content/scroll position are retained when only the inspection parameter changes.
+
+The compact preview row groups fallback, clipping, preview sampling, and inversion; the output row groups sample count, encoding, copy, and export. Control rows stay on one line and allow horizontal scrolling in narrow docks. Preview sampling can be continuous, fixed-count, or linked to the export count. Two additional regressions verify swatch-center selection, clamped endpoints, continuous/discrete direction changes, independent preview counts, exact reversal of all four output encodings, unchanged curve evaluation, inversion save/load, and defaults for older files. Inversion updates preview direction, pointer/keyboard/accessibility movement, marker placement, and serialized order together.
+
+The grayscale regression independently verifies preservation of linear-sRGB luminance. The opt-in CMYK regression ran against this machine's Windows sRGB and RSWOP profiles: it verifies actual saturation changes, finite bounded output, output count, black/white ordering, repeatability, and rejection of invalid inputs. Native transforms use 16-bit RGB → CMYK → RGB conversion, with profile/transform handles closed by RAII. Preview modes do not enter the colormap model or serialization path.
+
+The separate `target/debug/okclrmp-compact-output-preview.exe` supports manual review of the compact rows, bar sampling/inversion, HEX copy, and complete serialized output. These new native interactions have not been exercised by desktop automation.
+
 ## Named constant slider bindings
 
 Three model regressions cover all Degree/H and Fraction/L/C links, constant-to-slice and slice-to-constant updates, curves that reference the constants, direct chroma units and the 0.4 cap, occupied-slider rejection, incompatible type changes, unlinking, project roundtrips, defaults for older files, load-time slice synchronization, cyclic H=0/360, and view-only cursor following. For each spline plane they also verify shared orthogonal values, coplanarity, unchanged handles, and continued spline slider operation after the named link is removed. The numeric stepping regression checks that a C-bound fraction stops at 0.40.
 
-Native sliders use the same model operations and synchronize the constant field without emitting another input change. Programmatic slider updates retain the existing f32 equality guard to preserve saved f64 values; user slider values clamp to the axis range before conversion reaches project validation. The link menu marks occupied axes, and slice readouts identify linked constants and the spline binding through their tooltip/accessibility label. Numeric readouts retain the two-decimal cap. A separate `target/debug/okclrmp-binding-preview.exe` supports manual review; the new menu and native gestures have been compiled but not exercised through desktop automation.
+Native sliders use the same model operations and synchronize the constant field without emitting another input change. Programmatic slider updates retain the existing f32 equality guard to preserve saved f64 values; user slider values clamp to the axis range before conversion reaches project validation. The link menu marks occupied axes, and slice readouts identify linked constants and the spline binding through their tooltip/accessibility label. Numeric readouts use the per-type precision limits above. A separate `target/debug/okclrmp-binding-preview.exe` supports manual review; the new menu and native gestures have been compiled but not exercised through desktop automation.
 
 A separate `target/debug/okclrmp-projection-preview.exe` provides a native build for manual interaction review. No new native mouse-gesture pass is claimed.
 

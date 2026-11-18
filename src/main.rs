@@ -15,7 +15,7 @@ fn main() -> anyhow::Result<()> {
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
-            Theme::change(ThemeMode::Dark, None, cx);
+            Theme::change(ThemeMode::Light, None, cx);
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();

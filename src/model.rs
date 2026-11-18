@@ -128,6 +128,8 @@ pub struct Project {
     pub cursor: f64,
     pub sample_count: usize,
     pub map_chroma: bool,
+    #[serde(default)]
+    pub reverse_output: bool,
     pub yaw: f32,
     pub pitch: f32,
     pub zoom: f32,
@@ -205,13 +207,14 @@ impl Project {
             cursor: 0.5,
             sample_count: 256,
             map_chroma: true,
+            reverse_output: false,
             yaw: -0.65,
             pitch: 0.65,
             zoom: 1.,
             hue_origin: 0.,
             polar: false,
             show_slice_contours: false,
-            orthographic: false,
+            orthographic: true,
         };
         project.migrate_spline().expect("valid preset spline");
         project

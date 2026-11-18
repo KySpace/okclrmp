@@ -2,8 +2,8 @@
 //! These do not participate in colormap conversion or export.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Appearance {
-    #[default]
     Dark,
+    #[default]
     Light,
 }
 

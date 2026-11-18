@@ -1,8 +1,6 @@
 use super::*;
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
-use okclrmp::constants::{
-    Constant, ConstantKind, display_value, limit_precision, step_number_with_binding,
-};
+use okclrmp::constants::{Constant, ConstantKind, limit_precision, step_number_with_binding};
 
 struct LabelDrag {
     origin: Pixels,
@@ -32,8 +30,9 @@ impl ConstantEditor {
         cx: &mut Context<Self>,
     ) -> Self {
         let name = cx.new(|cx| InputState::new(window, cx).default_value(constant.name.clone()));
-        let value =
-            cx.new(|cx| InputState::new(window, cx).default_value(display_value(constant.value)));
+        let value = cx.new(|cx| {
+            InputState::new(window, cx).default_value(constant.kind.display(constant.value))
+        });
         let mut subscriptions = vec![
             cx.subscribe_in(&name, window, |this, _, event, window, cx| {
                 match event {
@@ -84,8 +83,9 @@ impl ConstantEditor {
     pub(super) fn sync_value(&mut self, value: f64, window: &mut Window, cx: &mut Context<Self>) {
         self.drag = None;
         self.scroll = 0.;
-        self.value
-            .update(cx, |s, cx| s.set_value(display_value(value), window, cx));
+        self.value.update(cx, |s, cx| {
+            s.set_value(self.kind.display(value), window, cx)
+        });
         cx.notify();
     }
     fn choose_binding(
@@ -174,7 +174,7 @@ impl ConstantEditor {
             let text = self.value.read(cx).value();
             if text.parse::<f64>().ok() != Some(constant.value) {
                 self.value.update(cx, |s, cx| {
-                    s.set_value(display_value(constant.value), window, cx)
+                    s.set_value(self.kind.display(constant.value), window, cx)
                 });
             }
         }
@@ -183,7 +183,7 @@ impl ConstantEditor {
     fn limit_precision(&self, window: &mut Window, cx: &mut Context<Self>) {
         let state = self.value.read(cx);
         let text = state.value();
-        if let Some(rounded) = limit_precision(&text) {
+        if let Some(rounded) = limit_precision(&text, self.kind) {
             let cursor = state.cursor().min(rounded.len());
             self.value.update(cx, |s, cx| {
                 s.set_value(rounded, window, cx);
@@ -231,8 +231,9 @@ impl ConstantEditor {
         drag.moved = true;
         if let Some(value) = self.kind.drag(drag.value, distance) {
             let value = self.binding.map_or(value, |b| value.clamp(0., b.max()));
-            self.value
-                .update(cx, |s, cx| s.set_value(display_value(value), window, cx));
+            self.value.update(cx, |s, cx| {
+                s.set_value(self.kind.display(value), window, cx)
+            });
             self.publish(window, cx);
         }
     }
