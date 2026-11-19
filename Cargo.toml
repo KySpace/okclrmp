@@ -6,11 +6,12 @@ description = "An OKLCH colormap workbench"
 license = "MIT"
 
 [workspace]
-members = ["vendor/accesskit_windows"]
-default-members = ["."]
+members = ["crates/okclrmp-core", "vendor/accesskit_windows"]
+default-members = [".", "crates/okclrmp-core"]
 resolver = "3"
 
 [dependencies]
+okclrmp-core = { version = "0.1.0", path = "crates/okclrmp-core" }
 gpui-kit = "=0.10.0"
 anyhow = "1"
 bytemuck = { version = "1", features = ["derive"] }
@@ -18,7 +19,6 @@ glam = { version = "0.30", features = ["bytemuck"] }
 wgpu = "30.0.1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 pollster = "0.4"
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [target.'cfg(windows)'.dependencies]

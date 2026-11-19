@@ -1,0 +1,13 @@
+[package]
+name = "okclrmp-core"
+version = "0.1.0"
+edition = "2024"
+description = "Load OKLCH Colormap Studio projects and sample their colormaps without a UI or GPU"
+license = "MIT"
+readme = "README.md"
+keywords = ["colormap", "oklch", "color", "heatmap"]
+categories = ["graphics", "visualization"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -17,6 +17,28 @@ cargo run -- --check-gpu
 
 The second command executes both WGSL pipelines on the actual adapter, compares slice pixels against the Rust color conversions, and writes four small images to `.research/gpu-check/`.
 
+## Using colormaps in another program
+
+The standalone [`okclrmp-core`](crates/okclrmp-core/README.md) crate loads project files and samples their colormaps with only Serde/serde_json dependencies. It does not pull in GPUI, WGPU, or Windows APIs. Add it as a local dependency:
+
+```toml
+[dependencies]
+okclrmp-core = { path = "../okclrmp/crates/okclrmp-core" }
+```
+
+```rust,no_run
+use okclrmp_core::Colormap;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let map = Colormap::load("colormap.okclrmp.json")?;
+    let color = map.sample_rgba8(0.75)?;
+    let lookup_table = map.rgba8_lut(256)?;
+    Ok(())
+}
+```
+
+`sample` returns original OKLCH coordinates; `sample_srgb` and `sample_rgba8` apply the saved RGB mapping policy. All methods honor output inversion. JSON strings, readers, Serde deserialization, and existing `Project` values are supported. Normalize heatmap values into `[0, 1]` before sampling, or build a lookup table once for your renderer. See the crate README for error handling and the standard-library heatmap example. The app uses the same extracted implementation and retains its existing project format and behavior. The crate is ready for local use and has not been published to crates.io.
+
 ## Workflow
 
 - Open the compact **Starting point** dropdown to choose a curve with a color-strip preview. The five hard-coded maps come from `samples/`: **Linear · Green**, **Linear · Viridis**, **Symmetric · Green / Magenta**, **Symmetric · Turbo**, and **Cyclic · Hue**. Only their colormap definitions are included; choosing one preserves your camera, reference overlays, sample count, and RGB mapping choice. New sessions start with Linear · Green.
@@ -123,6 +145,6 @@ On Windows the output's **Copy colors** action uses the live window as clipboard
 
 ## Source map
 
-`color.rs` — OKLCH/OKLab/sRGB conversions and gamut search. `constants.rs` — typed numeric constraints, digit stepping, and legacy constant migration. `expr.rs` — closed scalar parser and reusable variables. `model.rs` — parametric curves, cyclic views, intersections, presets, project state. `spline.rs` — cubic Bézier geometry, constraints, snapping, and drag state. `exchange.rs` — import/export. `gpu.rs`, `gamut_mesh.rs`, and `shaders/` — WGPU images and boundary geometry. `ui.rs` and `ui/constant_editor.rs` — native Kit components, editing, docking, and interaction.
+`crates/okclrmp-core/src/` contains `colormap.rs` (headless loading/sampling API), `color.rs` (OKLCH/OKLab/sRGB conversions and gamut search), `constants.rs` (typed numeric constraints, digit stepping, and legacy constant migration), `expr.rs` (closed scalar parser and reusable variables), `model.rs` (curves, cyclic views, intersections, presets, and project state), `spline.rs` (cubic geometry and editing constraints), and `exchange.rs` (import/export). The app re-exports these modules at its original paths. Under `src/`, `gpu.rs`, `gamut_mesh.rs`, and `shaders/` provide WGPU images and boundary geometry; `ui.rs` and `ui/` provide native Kit components, editing, docking, and interaction.
 
 Inspired by [OKLCH Color Picker & Converter](https://oklch.com/). Color conversion matrices follow the [original OKLab specification](https://bottosson.github.io/posts/oklab/).

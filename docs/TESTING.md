@@ -1,4 +1,4 @@
-# Verification — 2026-11-18
+# Verification — 2026-11-19
 
 Verified on Windows with Rust `1.101.0-nightly (249c1e4e3 2026-11-05)`, GPUI Kit 0.10.0, and NVIDIA GeForce RTX 4050 Laptop GPU. Native interaction checks used the computer-use skill against the built app. Clipboard and file-dialog checks ran the app with normal desktop access; restricted shell processes cannot access the same clipboard.
 
@@ -6,7 +6,9 @@ Verified on Windows with Rust `1.101.0-nightly (249c1e4e3 2026-11-05)`, GPUI Kit
 
 | Check | Result |
 | --- | --- |
-| `cargo test --offline --all-targets` | 53 core tests passed; 6 GPU/profile tests are opt-in; binary test target built successfully |
+| `cargo test --offline --all-targets` | 61 tests passed across the app and headless crate; 6 GPU/profile tests are opt-in; binary and example targets built successfully |
+| `cargo test --offline -p okclrmp-core --doc` | Public loading/sampling example compiles |
+| `cargo package --offline --allow-dirty -p okclrmp-core` | Standalone archive created and verified outside the app workspace |
 | `cargo test --lib -- --ignored --nocapture` | All five hardware GPU tests and the Windows CMYK profile test passed |
 | `cargo test -p accesskit_windows --lib unavailable_window_returns_uia_error_without_panicking` | 1 targeted teardown regression passed |
 | `cargo clippy --all-targets -- -D warnings` | Passed |
@@ -16,6 +18,14 @@ Verified on Windows with Rust `1.101.0-nightly (249c1e4e3 2026-11-05)`, GPUI Kit
 GPU validation checks 368 C–L, 512 C–H, and 555 L–H interior pixels against the Rust OKLCH → sRGB conversion (1,435 comparisons, ≤2 byte-level difference). Filtered graticule pixels and pixels whose footprint touches the gamut boundary are excluded from this pointwise check. The earlier perspective preview contains 7,989 distinctly colored surface pixels with 4× MSAA. Image size and alpha are also checked. Four images are written under `.research/gpu-check/`.
 
 Core tests cover conversion reference values and roundtrips, gamut boundaries, expression precedence/ternaries/constants/errors/builtins, cubic spline geometry and editing, legacy quadratic migration, spline channel ownership, slice intersections including jumps and tangencies, constant slice intervals, shortest-arc hue interpolation and 360° endpoints, saved project reproduction, import parsing, and output sample counts/endpoints/mapping policy.
+
+## Headless colormap crate
+
+`okclrmp-core` contains the six shared color/expression/constant/model/spline/exchange modules, unchanged apart from their location. The app retains compatibility re-exports and uses the same types and implementation. Dependency-tree inspection confirms only Serde and serde_json, with no UI, GPU, image, or Windows dependencies in the headless crate. Workspace default members include both packages, so the normal test command continues to run the extracted regressions.
+
+Seven new API tests cover legacy project JSON, files/readers/direct Serde deserialization, expression constants and derived variables, immutability and Send/Sync use across threads, spline orthogonal constants and named slider synchronization in all three planes, imported paths crossing hue zero, output inversion, chroma mapping versus clipping, exact LUT reversal and independent LUT size, endpoint clamping, invalid documents and parameters, and singularities missed by the fixed load-time grid. A separate app integration regression checks all five actual sample projects under both inversion and mapping choices, comparing continuous colors and all 67 LUT entries against the app's exporter. Float comparisons use the same saved JSON on both sides to include the app's existing JSON parsing behavior.
+
+Packaging verified a 36.8 KiB `target/package/okclrmp-core-0.1.0.crate` archive in its extracted, standalone source tree. The included standard-library example loads `samples/linear.viridis.json` and writes a 512×256 synthetic heatmap to `.research/core-heatmap.ppm`. No app UI or rendering source changed; the hardware and native interaction results elsewhere in this document are from earlier checks.
 
 ## Sample starting points and compact Curve studio
 

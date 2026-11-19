@@ -4664,12 +4664,20 @@ dependencies = [
  "glam",
  "gpui-kit",
  "image",
+ "okclrmp-core",
  "pollster",
  "raw-window-handle",
- "serde",
  "serde_json",
  "wgpu",
  "windows 0.62.2",
+]
+
+[[package]]
+name = "okclrmp-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

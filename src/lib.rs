@@ -1,11 +1,9 @@
 pub mod appearance;
-pub mod color;
-pub mod constants;
-pub mod exchange;
-pub mod expr;
 mod gamut_mesh;
 pub mod gpu;
-pub mod model;
 pub mod preview;
-pub mod spline;
 pub mod starting_points;
+
+// Keep the app's existing module paths and types while sharing one implementation.
+pub use okclrmp_core::{Colormap, LoadError, Oklch, SampleError};
+pub use okclrmp_core::{color, constants, exchange, expr, model, spline};
