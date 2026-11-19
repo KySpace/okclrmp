@@ -7,7 +7,7 @@ Verified on Windows with Rust `1.101.0-nightly (249c1e4e3 2026-11-05)`, GPUI Kit
 | Check | Result |
 | --- | --- |
 | `cargo test --offline --all-targets` | 61 tests passed across the app and headless crate; 6 GPU/profile tests are opt-in; binary and example targets built successfully |
-| `cargo test --offline -p okclrmp-core --doc` | Public loading/sampling example compiles |
+| `cargo test --offline -p okclrmp-core --doc` | Public loading/sampling and adaptive annotation examples pass |
 | `cargo package --offline --allow-dirty -p okclrmp-core` | Standalone archive created and verified outside the app workspace |
 | `cargo test --lib -- --ignored --nocapture` | All five hardware GPU tests and the Windows CMYK profile test passed |
 | `cargo test -p accesskit_windows --lib unavailable_window_returns_uia_error_without_panicking` | 1 targeted teardown regression passed |
@@ -25,7 +25,9 @@ Core tests cover conversion reference values and roundtrips, gamut boundaries, e
 
 Seven new API tests cover legacy project JSON, files/readers/direct Serde deserialization, expression constants and derived variables, immutability and Send/Sync use across threads, spline orthogonal constants and named slider synchronization in all three planes, imported paths crossing hue zero, output inversion, chroma mapping versus clipping, exact LUT reversal and independent LUT size, endpoint clamping, invalid documents and parameters, and singularities missed by the fixed load-time grid. A separate app integration regression checks all five actual sample projects under both inversion and mapping choices, comparing continuous colors and all 67 LUT entries against the app's exporter. Float comparisons use the same saved JSON on both sides to include the app's existing JSON parsing behavior.
 
-Packaging verified a 36.8 KiB `target/package/okclrmp-core-0.1.0.crate` archive in its extracted, standalone source tree. The included standard-library example loads `samples/linear.viridis.json` and writes a 512×256 synthetic heatmap to `.research/core-heatmap.ppm`. No app UI or rendering source changed; the hardware and native interaction results elsewhere in this document are from earlier checks.
+Packaging verified `target/package/okclrmp-core-0.1.0.crate` in its extracted, standalone source tree. The included standard-library example loads `samples/linear.viridis.json` and writes a 512×256 synthetic heatmap to `.research/core-heatmap.ppm`. No app UI or rendering source changed; the hardware and native interaction results elsewhere in this document are from earlier checks.
+
+The adaptive annotation function now lives in `okclrmp_core::helpers::annotation_ink`, with its body unchanged from the app's preview module. The app retains its original entry point through a re-export. A public doctest demonstrates converting a displayed sRGB background to OKLCH, choosing ink, and converting it back to RGBA8. The helper introduces no dependencies.
 
 ## Sample starting points and compact Curve studio
 

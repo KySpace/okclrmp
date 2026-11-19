@@ -28,6 +28,15 @@ Positions refer to the **output colorbar**, including its saved inversion. Finit
 
 RGB sampling honors the project's saved chroma mapping or channel clipping choice. `sample` returns original OKLCH coordinates, including out-of-gamut values and unwrapped hue, without gamut mapping. To override the saved RGB policy, use `map.sample(t)?.rgba8(true)` for chroma mapping or `rgba8(false)` for clipping. RGB output is gamma encoded; use `okclrmp_core::color::decode` on its channels if your renderer expects linear-light RGB.
 
+The `helpers` module exposes the same adaptive text/annotation color algorithm used by the app. Pass the displayed background color in OKLCH and convert the returned foreground color for your renderer:
+
+```rust
+use okclrmp_core::{Oklch, helpers::annotation_ink};
+
+let background = Oklch::from_srgb([0.9, 0.9, 0.9]);
+let text_rgba = annotation_ink(background).rgba8(true);
+```
+
 Existing project JSON is loaded through the same types, legacy quadratic/constant migration, slider-binding synchronization, and validation as the app. Expression, cubic/linear spline, orthogonal-constant, and imported-path modes are supported. The compiled map discards project descriptions and camera metadata. Advanced project/editing types remain available in `model`, `constants`, `expr`, `spline`, `color`, and `exchange`.
 
 Expression validation checks the app's fixed set of 1,025 positions at load time. Expressions can still have singularities between them, so sampling also checks for non-finite results and returns an error rather than silently producing an invalid color. This crate evaluates expressions, not arbitrary host-language code.

@@ -39,6 +39,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `sample` returns original OKLCH coordinates; `sample_srgb` and `sample_rgba8` apply the saved RGB mapping policy. All methods honor output inversion. JSON strings, readers, Serde deserialization, and existing `Project` values are supported. Normalize heatmap values into `[0, 1]` before sampling, or build a lookup table once for your renderer. See the crate README for error handling and the standard-library heatmap example. The app uses the same extracted implementation and retains its existing project format and behavior. The crate is ready for local use and has not been published to crates.io.
 
+`okclrmp_core::helpers::annotation_ink(background)` also exposes the app's adaptive text-color algorithm. Both the background and returned foreground use OKLCH; convert the result to RGB for rendering.
+
 ## Workflow
 
 - Open the compact **Starting point** dropdown to choose a curve with a color-strip preview. The five hard-coded maps come from `samples/`: **Linear · Green**, **Linear · Viridis**, **Symmetric · Green / Magenta**, **Symmetric · Turbo**, and **Cyclic · Hue**. Only their colormap definitions are included; choosing one preserves your camera, reference overlays, sample count, and RGB mapping choice. New sessions start with Linear · Green.
@@ -72,7 +74,7 @@ Below the bar, click the color/HEX button to copy the inspected color as HEX. Th
 
 **Invert** reverses both the colorbar and exported sample order, and is saved with the project. The curve, its editable nodes, and the inspected source color stay unchanged; marker placement, scrubbing, keyboard movement, and endpoint labels follow the displayed direction. Older projects default to forward output.
 
-The inspection marker and its parameter label share one ink color computed from the displayed background directly beneath the marker. The editable ink mapping lives in `preview::annotation_ink`. Endpoint labels use their local backgrounds. This includes stepped, reversed, CMYK, and grayscale previews, with no outline or background fill.
+The inspection marker and its parameter label share one ink color computed from the displayed background directly beneath the marker. The editable ink mapping lives in `okclrmp_core::helpers::annotation_ink`, re-exported by the app's preview module. Endpoint labels use their local backgrounds. This includes stepped, reversed, CMYK, and grayscale previews, with no outline or background fill.
 
 The **Fallback** dropdown offers original sRGB, CMYK, and grayscale previews. CMYK uses Windows color transforms through the installed `RSWOP.icm` print profile, using relative colorimetric intent. This preview represents that SWOP printing condition; another press or paper needs its own profile. Grayscale preserves linear-sRGB luminance. Fallbacks affect the preview only; copied/exported samples keep their selected original format and mapping policy. CMYK is disabled with an explanation if the required system profiles are unavailable. See [Windows color transforms](https://learn.microsoft.com/en-us/windows/win32/api/icm/nf-icm-translatecolors).
 

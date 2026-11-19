@@ -23,6 +23,7 @@ mod colormap;
 pub mod constants;
 pub mod exchange;
 pub mod expr;
+pub mod helpers;
 pub mod model;
 pub mod spline;
 

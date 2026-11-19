@@ -1,26 +1,8 @@
 //! Output preview color transforms, sampling, and reversible parameter positioning.
-use crate::color::{Oklch, decode, encode};
+use crate::color::{decode, encode};
 
-/// Experimental single-color ink for an OKLCH background.
-pub fn annotation_ink(background: Oklch) -> Oklch {
-    let (l_thres, l_min, l_max) = (0.65, 0.87, 0.45);
-    let frac_l_bias = if background.l > l_thres {
-        (1. - background.l) / (1. - l_thres)
-    } else {
-        background.l / l_thres
-    }; // frac = 0 means black or white background, frac = 1 means at grayish threshold
-    let c_max = if background.l > l_thres { 0.07 } else { 0.11 };
-    let l = if background.l > l_thres {
-        l_max * (1. - frac_l_bias)
-    } else {
-        l_min + (1. - l_min) * frac_l_bias
-    };
-    Oklch::new(
-        l,
-        c_max * (1. - frac_l_bias),
-        (background.h + 120.).rem_euclid(360.),
-    )
-}
+// Preserve the app's existing API while using the shared core helper.
+pub use crate::helpers::annotation_ink;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Fallback {
